@@ -11,10 +11,11 @@ import { IcaUnavailable, errorCategory } from './errors.js';
  *   After the cooldown exactly one request is let through as a probe (half-open): any HTTP answer that is not a WAF
  *   stop closes the breaker and resets the cooldown; a WAF stop reopens it with the doubled cooldown; no answer at all
  *   (network, timeout) is inconclusive and the next request probes again.
- * - pacing: one queue for the whole process, request starts at least `minGapMs` apart, at most `maxQueued` waiting.
+ * - pacing: one queue for the whole process, request starts at least `minGapMs` apart, at most `maxQueued` (10) waiting.
  *   The queue wait comes before the request's 15 s timeout starts, so waiting never times a request out; a caller that
  *   gives up (abort signal) is dropped from the queue before anything is sent.
- * - a small in-memory LRU of successful answers (search 15 min, store search 24 h, 500 entries).
+ * - a small in-memory LRU of successful answers (search 15 min, store search 24 h, 500 entries). A cached answer
+ *   needs no Handla request, so it is served even while the breaker is open (createHandlaApi checks it first).
  *
  * Each breaker change is logged once at warn as `{ handla, cooldownMinutes }`; never a query, zip or store id.
  */
@@ -25,7 +26,7 @@ export type HandlaGuardOptions = {
   maxCooldownMinutes?: number;
   /** Minimum time between two Handla request starts (ICA_HUB_HANDLA_MIN_GAP_MS, default 2500). */
   minGapMs?: number;
-  /** At most this many requests wait in the queue (default 20); more fail fast with `queue-full`. */
+  /** At most this many requests wait in the queue (default 10: a worst wait of about 25 s at the default gap, inside typical MCP tool timeouts); more fail fast with `queue-full`. */
   maxQueued?: number;
   /** How long a product search answer is kept (ICA_HUB_HANDLA_CACHE_MINUTES, default 15). 0 turns the whole cache off. */
   cacheMinutes?: number;
@@ -48,7 +49,7 @@ export function createHandlaGuard(o: HandlaGuardOptions = {}) {
   const baseMs = (o.cooldownMinutes ?? 10) * MIN_MS;
   const maxMs = Math.max(baseMs, (o.maxCooldownMinutes ?? 60) * MIN_MS);
   const gap = o.minGapMs ?? 2500;
-  const maxQueued = o.maxQueued ?? 20;
+  const maxQueued = o.maxQueued ?? 10;
   const ttl = { search: (o.cacheMinutes ?? 15) * MIN_MS, stores: (o.storeCacheMinutes ?? 24 * 60) * MIN_MS };
   const cacheOff = o.cacheMinutes === 0;
   const cacheMax = o.cacheMax ?? 500;
@@ -144,14 +145,22 @@ export function createHandlaGuard(o: HandlaGuardOptions = {}) {
 
   // ---- cache (a Map keeps insertion order: re-inserting on a hit makes it an LRU) ----
   const cache = new Map<string, { value: unknown; until: number }>();
+  /** A fresh cached answer (marked as most recently used), or undefined. Never contacts Handla, so it ignores the breaker. */
+  function peek<T>(kind: 'search' | 'stores', key: string): { value: T } | undefined {
+    if (cacheOff) return undefined;
+    const k = `${kind}\n${key}`;
+    const hit = cache.get(k);
+    if (!hit) return undefined;
+    cache.delete(k);
+    if (hit.until <= now()) return undefined;
+    cache.set(k, hit);
+    return { value: hit.value as T };
+  }
   async function cached<T>(kind: 'search' | 'stores', key: string, load: () => Promise<T>): Promise<T> {
     if (cacheOff) return load();
     const k = `${kind}\n${key}`;
-    const hit = cache.get(k);
-    if (hit) {
-      cache.delete(k);
-      if (hit.until > now()) { cache.set(k, hit); return hit.value as T; }
-    }
+    const hit = peek<T>(kind, key);
+    if (hit) return hit.value;
     const value = await load();
     cache.delete(k);
     cache.set(k, { value, until: now() + ttl[kind] });
@@ -160,7 +169,7 @@ export function createHandlaGuard(o: HandlaGuardOptions = {}) {
   }
 
   return {
-    assertAvailable, request, cached,
+    assertAvailable, request, cached, peek,
     /** get_session_status: whether Handla calls are refused right now, and for about how long. */
     status(): HandlaStatus {
       if (!tripped || (now() >= openUntil && !probing)) return { blocked: false }; // closed, or half-open: the next call probes

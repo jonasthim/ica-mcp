@@ -264,18 +264,19 @@ IP: about 7 searches within about 15 s and every Handla request from the hub's I
 - **Detection.** A WAF challenge (a 202 with `x-amzn-waf-action`) or a CloudFront 403 "Request blocked" is reported to
   Claude at once as "Handla's bot protection is blocking price lookups for a while … Try again in about N minutes.
   ICA lists, offers and bonus are not affected." It is never polled.
-- **Circuit breaker.** After a WAF stop every Handla call fails at once for a cooldown, without contacting Handla and
-  without spending the user's ICA budget token. When it ends, exactly one call is let through as a probe: an answer
+- **Circuit breaker.** After a WAF stop every Handla call that the cache cannot answer fails at once for a cooldown,
+  without contacting Handla and without spending the user's ICA budget token. When it ends, exactly one call is let through as a probe: an answer
   closes the breaker; another WAF stop reopens it with the cooldown doubled (up to 60 minutes). Each change is logged
   once at warn as `{ handla: 'blocked' | 'probe' | 'recovered', cooldownMinutes }`. `get_session_status` reports
   `handla: { blocked, retryInMinutes? }`.
 - **Pacing.** Handla requests start at least the minimum gap apart (one queue for the whole process, including the
-  short retries of a plain 202). At most 20 wait; more fail at once with "Too many Handla lookups queued; try fewer
-  items at once." A queued call whose MCP request was cancelled is dropped; the 15 s request timeout starts only when
+  short retries of a plain 202). At most 10 wait (a worst wait of about 25 s); more fail at once with "Too many
+  Handla lookups queued; try fewer items at once." A queued call whose MCP request was cancelled is dropped; the 15 s request timeout starts only when
   the request leaves the queue.
 - **Cache.** Successful answers are kept in memory: a product search per (store, query ignoring case and extra spaces,
   limit) for the cache TTL, a store search per postcode for 24 h, at most 500 entries. A cache hit makes no Handla
-  request but still spends one ICA budget token, like any tool call (one call, one token).
+  request but still spends one ICA budget token, like any tool call (one call, one token). Cached answers are served
+  even while the breaker is open, since they need no Handla request.
 
 | Variable | Default | Allowed | Effect |
 | --- | --- | --- | --- |

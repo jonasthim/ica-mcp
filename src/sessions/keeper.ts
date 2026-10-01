@@ -79,9 +79,10 @@ export type IcaUserSession = {
   /** www purchase history with the cookie jar; only while ICA reports loginState 2 (checked first), else NeedsFreshBankId. */
   purchases<T>(fn: (api: PurchaseApi) => Promise<T>): Promise<T>;
   /**
-   * Handla's anonymous store and product search: no ICA account needed, but it counts against the rate limit. While
-   * the process's Handla circuit breaker is open the call fails at once with IcaUnavailable('blocked'), before the
-   * budget token is taken. A cache hit still spends the token (one call, one token, whatever answers it).
+   * Handla's anonymous store and product search: no ICA account needed, but it counts against the rate limit. A
+   * cached answer is served even while the process's Handla circuit breaker is open, and still spends the token (one
+   * call, one token, whatever answers it). An uncached call while the breaker is open fails at once with
+   * IcaUnavailable('blocked'), before the token is taken.
    */
   handla<T>(fn: (api: HandlaApi) => Promise<T>): Promise<T>;
   /**
@@ -473,9 +474,9 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
       },
       status: (adminUrl: string): Promise<SessionStatus> => statusFor(userId, adminUrl),
       handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => {
-        handlaGuard.assertAvailable(); // breaker open: refuse before spending the user's budget token
-        take(userId);
-        return fn(createHandlaApi({ endpoints, guard: handlaGuard, ...(deps.handlaSleep ? { sleep: deps.handlaSleep } : {}) }));
+        // The API spends the token itself: after a cache hit (served even while the breaker is open), or after the
+        // breaker check for a miss, so a call the open breaker refuses spends nothing.
+        return fn(createHandlaApi({ endpoints, guard: handlaGuard, charge: () => { take(userId); }, ...(deps.handlaSleep ? { sleep: deps.handlaSleep } : {}) }));
       },
     };
   }

@@ -265,9 +265,9 @@ What the hub does (src/ica/handla-api.ts, src/ica/handla-guard.ts):
 - A response with any `x-amzn-waf-action` header, or a 403 with `server` containing `CloudFront`, `x-cache` starting
   with `Error from cloudfront`, or a small body containing "Request blocked", is a WAF stop:
   `IcaUnavailable('blocked')` at once, never polled.
-- A process-wide circuit breaker then refuses every Handla call for a cooldown (10 min, doubled after each probe that
+- A process-wide circuit breaker then refuses every uncached Handla call for a cooldown (10 min, doubled after each probe that
   is stopped again, up to 60 min) without contacting Handla; after it, exactly one probe request goes through.
-- All Handla requests from the process go through one queue, at least 2.5 s apart (start to start), at most 20 waiting.
+- All Handla requests from the process go through one queue, at least 2.5 s apart (start to start), at most 10 waiting.
 - Successful answers are cached in memory (search 15 min, store search 24 h, 500 entries).
 
 **Store home page** — `GET https://handlaprivatkund.ica.se/stores/<accountId>/` → **HTTP 200**. The anonymous page **does** already embed a CSRF token (`"csrf":{"token":"..."}` present in the HTML — `csrf token present (anonymous): true`), and the page also matched the WAF/challenge heuristic (`waf challenge: true`) — the regex `/awswaf|challenge/i` matched somewhere in the HTML (likely boilerplate WAF/bot-protection script tags rather than an active interactive challenge, since the request still returned a normal 200 page body with product data reachable). Worth re-checking with the real network trace in Task 0.9 to see whether this is just static WAF JS or an actual blocking challenge under different conditions (e.g. higher request rate).

@@ -13,13 +13,13 @@ All notable changes to ica-mcp (the `ica-hub` package) are listed here. Versions
 - A plain 202 without a WAF header is retried only twice (0.5 s, then 1 s; `Retry-After` honoured up to 2 s).
 
 ### Added
-- Handla circuit breaker, one per process: after a WAF stop every Handla call fails at once for a cooldown (10 min,
+- Handla circuit breaker, one per process: after a WAF stop every uncached Handla call fails at once for a cooldown (10 min,
   doubled per failed probe up to 60 min) without contacting Handla or spending the user's ICA budget; then exactly one
   probe goes through. `ICA_HUB_HANDLA_COOLDOWN_MINUTES`. Breaker changes are logged at warn.
-- Handla pacing: one queue for the process, request starts at least 2.5 s apart, at most 20 waiting
+- Handla pacing: one queue for the process, request starts at least 2.5 s apart, at most 10 waiting
   (`ICA_HUB_HANDLA_MIN_GAP_MS`).
 - Handla cache: successful product searches for 15 min and store searches for 24 h, 500 entries
-  (`ICA_HUB_HANDLA_CACHE_MINUTES`; 0 turns it off). A cache hit still spends one ICA budget token.
+  (`ICA_HUB_HANDLA_CACHE_MINUTES`; 0 turns it off). A cache hit is served even while the breaker is open and still spends one ICA budget token.
 - `get_session_status` reports `handla: { blocked, retryInMinutes? }`.
 
 ## 0.2.1 — 2026-10-01

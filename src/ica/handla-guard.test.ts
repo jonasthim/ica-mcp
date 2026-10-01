@@ -124,17 +124,17 @@ describe('Handla pacing', () => {
     await p;
   });
 
-  it('bounds the queue: past 20 waiting, a call fails fast as queue-full without sending', async () => {
+  it('bounds the queue: past 10 waiting, a call fails fast as queue-full without sending', async () => {
     const g = guard({ minGapMs: 2500 });
     const sends: number[] = [];
-    const accepted = Array.from({ length: 21 }, (_, i) => g.request(() => { sends.push(i); return fine(); })); // 1 goes now, 20 wait
-    expect(g.queued()).toBe(20);
+    const accepted = Array.from({ length: 11 }, (_, i) => g.request(() => { sends.push(i); return fine(); })); // 1 goes now, 10 wait
+    expect(g.queued()).toBe(10);
     const extra = vi.fn(fine);
     expect(await err(g.request(extra))).toMatchObject({ name: 'IcaUnavailable', reason: 'queue-full' });
     expect(extra).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(21 * 2500);
+    await vi.advanceTimersByTimeAsync(11 * 2500);
     await Promise.all(accepted);
-    expect(sends).toHaveLength(21);
+    expect(sends).toHaveLength(11);
   });
 
   it('drops a queued call whose caller gave up, before it is sent', async () => {

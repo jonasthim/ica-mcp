@@ -89,10 +89,26 @@ export function createHandlaApi(o: {
   endpoints: IcaEndpoints; guard: HandlaGuard; fetcher?: Fetcher;
   /** Test-only: replaces the real 0.5 / 1 s waits before a plain-202 retry. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Spends the caller's ICA budget token (the keeper's `take`; throws RateLimited). Called once per `stores`/`search`
+   * call that is answered or sent: after a cache hit, or after the breaker check for a miss — never for a call the
+   * open breaker refuses.
+   */
+  charge?: () => void;
 }) {
   const f = o.fetcher ?? anonymous;
   const { guard } = o;
   const sleep = o.sleep ?? defaultSleep;
+  const charge = o.charge ?? (() => undefined);
+
+  /** Cache first (served even while the breaker is open), then the breaker, then the budget, then Handla. */
+  const answer = async <T>(kind: 'search' | 'stores', key: string, load: () => Promise<T>): Promise<T> => {
+    const hit = guard.peek<T>(kind, key);
+    if (hit) { charge(); return hit.value; }
+    guard.assertAvailable();
+    charge();
+    return guard.cached(kind, key, load);
+  };
 
   /** One paced, breaker-guarded GET: a WAF stop is `blocked`, anything else maps like any ICA call (icaResponse). */
   const get = (url: string, headers: Record<string, string>, signal: AbortSignal | undefined) => guard.request(async () => {
@@ -105,7 +121,7 @@ export function createHandlaApi(o: {
   }, signal);
 
   return {
-    stores: (zip: string, opts: HandlaCallOptions = {}): Promise<HandlaStoreSearch> => guard.cached('stores', zip, async () =>
+    stores: (zip: string, opts: HandlaCallOptions = {}): Promise<HandlaStoreSearch> => answer('stores', zip, async () =>
       parseIca(HandlaStoreSearchSchema, (await get(`${o.endpoints.handlaStores}/api/store/v1?${new URLSearchParams({ zip, customerType: 'B2C' })}`, {}, opts.signal)).json)),
     /**
      * A store's product search. A plain 202 (no WAF header) is retried at most twice (0.5 s, then 1 s; `Retry-After`
@@ -113,7 +129,7 @@ export function createHandlaApi(o: {
      * here spends exactly one of the caller's ICA budget tokens (taken by the keeper); the retries are internal.
      */
     search(storeId: string, query: string, max = 10, opts: HandlaCallOptions = {}): Promise<HandlaProduct[]> {
-      return guard.cached('search', `${storeId}\n${normaliseQuery(query)}\n${max}`, async () => {
+      return answer('search', `${storeId}\n${normaliseQuery(query)}\n${max}`, async () => {
         const base = `${o.endpoints.handla}/stores/${encodeURIComponent(storeId)}`;
         const url = `${base}/api/webproductpagews/v6/product-pages/search?${new URLSearchParams({ q: query, tag: 'web', maxPageSize: String(max), includeAdditionalPageInfo: 'false', maxProductsToDecorate: String(max) })}`;
         const headers = { Referer: `${base}/`, Origin: new URL(o.endpoints.handla).origin };

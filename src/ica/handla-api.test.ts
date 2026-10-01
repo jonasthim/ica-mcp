@@ -98,6 +98,25 @@ describe('Handla: AWS WAF stops (fake server)', () => {
     expect(g.status()).toEqual({ blocked: false });
   });
 
+  it('a cached answer is served while the breaker is open; an uncached query is refused; `charge` runs once per served call', async () => {
+    const g = createHandlaGuard({ minGapMs: 0 });
+    let charged = 0;
+    const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve(), charge: () => { charged += 1; } });
+    await a.search('HS-1001', 'mjölk');
+    await a.stores('12345');
+    fake.opts.handlaWaf = 'block';
+    await expect(a.search('HS-1001', 'ost')).rejects.toMatchObject({ reason: 'blocked' });
+    expect(charged).toBe(3);
+    fake.opts.handlaWaf = undefined;
+    await expect(a.search('HS-1001', 'ost')).rejects.toMatchObject({ reason: 'blocked' });
+    await expect(a.stores('99999')).rejects.toMatchObject({ reason: 'blocked' });
+    expect(charged).toBe(3); // refused by the open breaker: not charged
+    expect(await a.search('HS-1001', 'MJÖLK ')).toHaveLength(2);
+    expect((await a.stores('12345')).forHomeDelivery).toHaveLength(2);
+    expect(charged).toBe(5);
+    expect(fake.seen.handlaRequests).toHaveLength(3);
+  });
+
   it('caches a search per (store, normalised query, max) and a store search per zip', async () => {
     const g = createHandlaGuard({ minGapMs: 0 });
     const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve() });
@@ -203,17 +222,17 @@ describe('Handla pacing (mocked fetcher, fake timers)', () => {
     for (let i = 1; i < starts.length; i += 1) expect(starts[i]! - starts[i - 1]!).toBeGreaterThanOrEqual(2500);
   });
 
-  it('the queue is bounded at 20 waiting: the next search fails fast as queue-full', async () => {
+  it('the queue is bounded at 10 waiting: the next search fails fast as queue-full', async () => {
     let sent = 0;
     const fetcher: Fetcher = () => { sent += 1; return Promise.resolve(new Response(JSON.stringify({ productGroups: [] }), { status: 200 })); };
     const g = createHandlaGuard({ minGapMs: 2500, cacheMinutes: 0 });
     const a = createHandlaApi({ endpoints, fetcher, guard: g });
-    const accepted = Array.from({ length: 21 }, (_, i) => a.search('HS-1001', `q${i}`));
+    const accepted = Array.from({ length: 11 }, (_, i) => a.search('HS-1001', `q${i}`));
     await vi.advanceTimersByTimeAsync(0);
-    expect(g.queued()).toBe(20);
+    expect(g.queued()).toBe(10);
     await expect(a.search('HS-1001', 'one too many')).rejects.toMatchObject({ reason: 'queue-full' });
     await vi.advanceTimersByTimeAsync(60_000);
     await Promise.all(accepted);
-    expect(sent).toBe(21);
+    expect(sent).toBe(11);
   });
 });

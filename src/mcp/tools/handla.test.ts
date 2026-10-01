@@ -107,6 +107,27 @@ describe('Handla tools: AWS WAF stop', () => {
     } finally { await w.close(); }
   });
 
+  it('while the breaker is open a cached answer is still served (spending a token, no request); an uncached one is refused (spending none)', async () => {
+    const w = await startToolTest({ icaRateLimit: { capacity: 4, refillPerSecond: 0.001 } });
+    try {
+      expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false); // token 1, cached
+      expect((await w.carol.client.call('handla_find_stores', { zip: '12345' })).isError).toBe(false); // token 2, cached
+      w.fake.opts.handlaWaf = 'challenge';
+      expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'ost' })).text).toContain("Handla's bot protection"); // token 3, trips
+      expect(w.fake.seen.handlaRequests).toHaveLength(3);
+      w.fake.opts.handlaWaf = undefined;
+      // Uncached: refused before any request and before the budget (tried three times; only one token is left).
+      for (let i = 0; i < 3; i += 1) expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'ost' })).text).toContain("Handla's bot protection");
+      // Cached: answered from the cache while blocked, spending the last token.
+      const hit = await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'Mjölk' });
+      expect(hit.isError).toBe(false);
+      expect((hit.json as { products: unknown[] }).products).toHaveLength(2);
+      expect(w.fake.seen.handlaRequests).toHaveLength(3);
+      // The budget is now used up: even a cached answer is refused by the per-user limit.
+      expect((await w.carol.client.call('handla_find_stores', { zip: '12345' })).text).toMatch(/Try again in \d+ s/);
+    } finally { await w.close(); }
+  });
+
   it('a CloudFront 403 block is the same stop, not "refused the credential"', async () => {
     const w = await startToolTest();
     try {
