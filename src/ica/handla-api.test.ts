@@ -7,22 +7,25 @@ import { FAKE_HANDLA_ROUTES, startFakeIca, type FakeIca } from './test-fakes.js'
 
 let fake: FakeIca;
 let guard: HandlaGuard;
-beforeEach(async () => { fake = await startFakeIca({ pendingPolls: 0, routes: FAKE_HANDLA_ROUTES }); guard = createHandlaGuard({ minGapMs: 0, cacheMinutes: 0 }); });
+beforeEach(async () => { fake = await startFakeIca({ pendingPolls: 0, routes: FAKE_HANDLA_ROUTES }); guard = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 }); });
 afterEach(async () => { await fake.close(); });
 /** No real waits in this suite: pending-202 cases only exercise the retry *count*, never real timing. No pacing, no cache. */
 const api = () => createHandlaApi({ endpoints: fake.endpoints, guard, sleep: () => Promise.resolve() });
 
 describe('Handla public API', () => {
   it('finds stores by zip, anonymously', async () => {
-    const r = await api().stores('12345');
-    expect(r.forHomeDelivery.map((st) => [st.accountId, st.name])).toEqual([['HS-1001', 'ICA Kvantum Testköping'], ['HS-1002', 'ICA Nära Fakeby']]);
-    expect(r.forPickupDelivery.map((st) => st.accountId)).toEqual(['HS-1001']);
+    const r = await createHandlaApi({ endpoints: fake.endpoints, guard, clock: () => new Date('2026-10-01T10:00:00Z') }).stores('12345');
+    expect(r).toEqual({ asOf: '2026-10-01T10:00:00.000Z', stores: [
+      { id: 'HS-1001', name: 'ICA Kvantum Testköping', city: 'Testköping', delivery: true, pickup: true },
+      { id: 'HS-1002', name: 'ICA Nära Fakeby', city: 'Fakeby', delivery: true, pickup: false },
+    ] });
     expect(fake.seen.handlaRequests[0]).toMatchObject({ path: '/api/store/v1', auth: null, cookie: null });
   });
 
   it('searches a store\'s products with prices, with the store page as referer and no credentials', async () => {
-    const products = await api().search('HS-1001', 'mjölk');
-    expect(products.map((p) => [p.productId, p.name, p.price?.amount])).toEqual([['p-1', 'Mellanmjölk 1,5%', '15.90'], ['p-2', 'Laktosfri mjölk', '19.50']]);
+    const r = await api().search('HS-1001', 'mjölk');
+    expect(r.products.map((p) => [p.id, p.name, p.price])).toEqual([['p-1', 'Mellanmjölk 1,5%', '15.90 SEK'], ['p-2', 'Laktosfri mjölk', '19.50 SEK']]);
+    expect(Date.parse(r.asOf)).not.toBeNaN();
     expect(fake.seen.handlaRequests[0]).toMatchObject({ auth: null, cookie: null, referer: `${fake.endpoints.handla}/stores/HS-1001/` });
   });
 
@@ -39,7 +42,7 @@ describe('Handla public API', () => {
 describe('Handla product search: a plain 202 (no WAF header)', () => {
   it('is retried briefly and succeeds once Handla answers', async () => {
     fake.opts.handlaPending = 2;
-    expect(await api().search('HS-1001', 'mjölk')).toHaveLength(2);
+    expect((await api().search('HS-1001', 'mjölk')).products).toHaveLength(2);
     expect(fake.seen.handlaRequests).toHaveLength(3); // 1 initial + 2 retries
   });
 
@@ -80,7 +83,7 @@ describe('Handla: AWS WAF stops (fake server)', () => {
 
   it('breaker against the fake: one probe after the cooldown; stopped again doubles it, an answer closes it', async () => {
     let clock = 0;
-    const g = createHandlaGuard({ minGapMs: 0, cacheMinutes: 0, now: () => clock });
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0, now: () => clock });
     const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve() });
     fake.opts.handlaWaf = 'challenge';
     await expect(a.search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked' });
@@ -93,13 +96,13 @@ describe('Handla: AWS WAF stops (fake server)', () => {
     expect(g.status()).toEqual({ blocked: true, retryInMinutes: 20 });
     clock += 20 * 60_000;
     fake.opts.handlaWaf = undefined;
-    expect(await a.search('HS-1001', 'mjölk')).toHaveLength(2);
+    expect((await a.search('HS-1001', 'mjölk')).products).toHaveLength(2);
     expect(fake.seen.handlaRequests).toHaveLength(3);
     expect(g.status()).toEqual({ blocked: false });
   });
 
   it('a cached answer is served while the breaker is open; an uncached query is refused; `charge` runs once per served call', async () => {
-    const g = createHandlaGuard({ minGapMs: 0 });
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60 });
     let charged = 0;
     const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve(), charge: () => { charged += 1; } });
     await a.search('HS-1001', 'mjölk');
@@ -111,14 +114,14 @@ describe('Handla: AWS WAF stops (fake server)', () => {
     await expect(a.search('HS-1001', 'ost')).rejects.toMatchObject({ reason: 'blocked' });
     await expect(a.stores('99999')).rejects.toMatchObject({ reason: 'blocked' });
     expect(charged).toBe(3); // refused by the open breaker: not charged
-    expect(await a.search('HS-1001', 'MJÖLK ')).toHaveLength(2);
-    expect((await a.stores('12345')).forHomeDelivery).toHaveLength(2);
+    expect((await a.search('HS-1001', 'MJÖLK ')).products).toHaveLength(2);
+    expect((await a.stores('12345')).stores).toHaveLength(2);
     expect(charged).toBe(5);
     expect(fake.seen.handlaRequests).toHaveLength(3);
   });
 
   it('caches a search per (store, normalised query, max) and a store search per zip', async () => {
-    const g = createHandlaGuard({ minGapMs: 0 });
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60 });
     const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve() });
     await a.search('HS-1001', 'Mjölk');
     await a.search('HS-1001', '  mjölk ');
@@ -136,11 +139,13 @@ describe('isWafStop', () => {
   it.each([
     ['any status with x-amzn-waf-action', new Response(null, { status: 202, headers: { 'x-amzn-waf-action': 'challenge' } }), true],
     ['a 200 with x-amzn-waf-action', new Response('{}', { status: 200, headers: { 'x-amzn-waf-action': 'captcha' } }), true],
-    ['403 with server: CloudFront', new Response('', { status: 403, headers: { server: 'CloudFront' } }), true],
-    ['403 with x-cache: Error from cloudfront', new Response('', { status: 403, headers: { 'x-cache': 'Error from cloudfront' } }), true],
+    ['403 with another x-amzn-waf-* header', new Response('', { status: 403, headers: { 'x-amzn-waf-id': 'x' } }), true],
+    ['403 with server: CloudFront alone (origin 4xx through CloudFront)', new Response('', { status: 403, headers: { server: 'CloudFront' } }), false],
+    ['403 with x-cache: Error from cloudfront alone', new Response('', { status: 403, headers: { 'x-cache': 'Error from cloudfront' } }), false],
     ['403 with a small "Request blocked" body', new Response(html, { status: 403 }), true],
     ['a plain 202', new Response(null, { status: 202 }), false],
-    ['a 403 from the origin (JSON)', new Response('{"error":"forbidden"}', { status: 403, headers: { 'content-type': 'application/json' } }), false],
+    ['a 403 from the origin (JSON) passed through CloudFront', new Response('{"error":"forbidden"}', { status: 403, headers: { 'content-type': 'application/json', server: 'CloudFront', 'x-cache': 'Error from cloudfront' } }), false],
+    ['a CloudFront block page with a lying small content-length', new Response(`${'x'.repeat(20_000)}Request blocked`, { status: 403, headers: { 'content-length': '100' } }), false],
     ['a 403 whose large body mentions it', new Response(`${'x'.repeat(20_000)}Request blocked`, { status: 403 }), false],
     ['a 200 from CloudFront', new Response('{}', { status: 200, headers: { server: 'CloudFront' } }), false],
   ])('%s → %s', async (_name, r, expected) => {
@@ -157,7 +162,7 @@ describe('Handla product search: retry timing (mocked fetcher)', () => {
     const fetcher: Fetcher = () => Promise.resolve(answers[Math.min(i++, answers.length - 1)]!);
     return { fetcher, calls: () => i };
   };
-  const make = (fetcher: Fetcher, waits: number[]) => createHandlaApi({ endpoints, fetcher, guard: createHandlaGuard({ minGapMs: 0, cacheMinutes: 0 }), sleep: (ms) => { waits.push(ms); return Promise.resolve(); } });
+  const make = (fetcher: Fetcher, waits: number[]) => createHandlaApi({ endpoints, fetcher, guard: createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 }), sleep: (ms) => { waits.push(ms); return Promise.resolve(); } });
 
   it('waits 0.5 s then 1 s by default', async () => {
     const { fetcher, calls } = sequence([new Response(null, { status: 202 }), new Response(null, { status: 202 }), new Response(null, { status: 202 })]);
@@ -174,7 +179,7 @@ describe('Handla product search: retry timing (mocked fetcher)', () => {
       new Response(okBody, { status: 200 }),
     ]);
     const waits: number[] = [];
-    expect(await make(fetcher, waits).search('HS-1001', 'mjölk')).toEqual([]);
+    expect((await make(fetcher, waits).search('HS-1001', 'mjölk')).products).toEqual([]);
     expect(waits).toEqual([2000, 1000]);
     expect(calls()).toBe(3);
   });
@@ -195,9 +200,12 @@ describe('Handla product search: retry timing (mocked fetcher)', () => {
     expect(waits).toEqual([500]);
   });
 
-  it('a non-WAF 403 is still IcaUnauthorized-shaped as before (origin refusal)', async () => {
-    const { fetcher } = sequence([new Response('{"error":"x"}', { status: 403, headers: { 'content-type': 'application/json' } })]);
-    await expect(make(fetcher, []).search('HS-1001', 'mjölk')).rejects.toMatchObject({ name: 'IcaUnauthorized', status: 403 });
+  it('a non-WAF 403 (origin refusal through CloudFront) is IcaRejected 403 and never opens the breaker', async () => {
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 });
+    const r403 = () => new Response('{"error":"x"}', { status: 403, headers: { 'content-type': 'application/json', server: 'CloudFront', 'x-cache': 'Error from cloudfront' } });
+    const a = createHandlaApi({ endpoints, fetcher: () => Promise.resolve(r403()), guard: g });
+    for (let i = 0; i < 3; i += 1) await expect(a.search('HS-BAD', 'mjölk')).rejects.toMatchObject({ name: 'IcaRejected', status: 403 });
+    expect(g.status()).toEqual({ blocked: false });
   });
 });
 
@@ -225,7 +233,7 @@ describe('Handla pacing (mocked fetcher, fake timers)', () => {
   it('the queue is bounded at 10 waiting: the next search fails fast as queue-full', async () => {
     let sent = 0;
     const fetcher: Fetcher = () => { sent += 1; return Promise.resolve(new Response(JSON.stringify({ productGroups: [] }), { status: 200 })); };
-    const g = createHandlaGuard({ minGapMs: 2500, cacheMinutes: 0 });
+    const g = createHandlaGuard({ minGapMs: 100, maxPerMinute: 60, cacheMinutes: 0 });
     const a = createHandlaApi({ endpoints, fetcher, guard: g });
     const accepted = Array.from({ length: 11 }, (_, i) => a.search('HS-1001', `q${i}`));
     await vi.advanceTimersByTimeAsync(0);
@@ -234,5 +242,64 @@ describe('Handla pacing (mocked fetcher, fake timers)', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await Promise.all(accepted);
     expect(sent).toBe(11);
+  });
+});
+
+describe('Handla API: budget refunds, window and cancellation (mocked fetcher)', () => {
+  const endpoints: IcaEndpoints = { ims: 'https://ims.example.com', web: 'https://www.example.com', gateway: 'https://gw.example.com', handla: 'https://handla.example.com', handlaStores: 'https://handla.example.com' };
+  const okFetch: Fetcher = () => Promise.resolve(new Response(JSON.stringify({ productGroups: [] }), { status: 200 }));
+  const budget = () => {
+    const b = { charged: 0, refunded: 0, charge: () => { b.charged += 1; return () => { b.refunded += 1; }; } };
+    return b;
+  };
+
+  it('cache hits never count toward the per-minute window', async () => {
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 2 });
+    let sent = 0;
+    const a = createHandlaApi({ endpoints, guard: g, fetcher: (...args) => { sent += 1; return okFetch(...args); } });
+    await a.search('S', 'a');
+    for (let i = 0; i < 5; i += 1) await a.search('S', 'a');
+    await a.search('S', 'b');
+    expect(sent).toBe(2);
+    await expect(a.search('S', 'c')).rejects.toMatchObject({ reason: 'rate-limited', perMinute: 2 });
+    expect(sent).toBe(2);
+  });
+
+  it('a call refused by the pacing (or the queue bound) before any request is sent gets its budget token back', async () => {
+    const b = budget();
+    const a = createHandlaApi({ endpoints, guard: createHandlaGuard({ minGapMs: 0, maxPerMinute: 1, cacheMinutes: 0 }), fetcher: okFetch, charge: b.charge });
+    await a.search('S', 'a');
+    await expect(a.search('S', 'b')).rejects.toMatchObject({ reason: 'rate-limited' });
+    expect(b).toMatchObject({ charged: 2, refunded: 1 });
+  });
+
+  it('a call that reached Handla keeps its token, even when it failed', async () => {
+    const b = budget();
+    const a = createHandlaApi({ endpoints, guard: createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 }), fetcher: () => Promise.resolve(new Response('x', { status: 503 })), charge: b.charge });
+    await expect(a.search('S', 'a')).rejects.toMatchObject({ reason: 'server-error' });
+    expect(b).toMatchObject({ charged: 1, refunded: 0 });
+  });
+
+  it('a caller abort during the fetch is `cancelled` (not network) and does not count as a breaker answer', async () => {
+    const c = new AbortController();
+    const fetcher: Fetcher = (_u, init) => new Promise((_r, j) => { init?.signal?.addEventListener('abort', () => { j(init.signal!.reason); }); });
+    const g = createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 });
+    const p = createHandlaApi({ endpoints, guard: g, fetcher }).search('S', 'a', 10, { signal: c.signal });
+    setTimeout(() => { c.abort(); }, 5);
+    await expect(p).rejects.toMatchObject({ name: 'IcaUnavailable', reason: 'cancelled' });
+  });
+
+  it('the plain-202 retry wait honours the abort signal: cancelled at once, no further request', async () => {
+    const c = new AbortController();
+    let calls = 0;
+    const fetcher: Fetcher = () => { calls += 1; return Promise.resolve(new Response(null, { status: 202 })); };
+    const b = budget();
+    const p = createHandlaApi({ endpoints, guard: createHandlaGuard({ minGapMs: 0, maxPerMinute: 60, cacheMinutes: 0 }), fetcher, charge: b.charge }).search('S', 'a', 10, { signal: c.signal });
+    setTimeout(() => { c.abort(); }, 20); // during the 500 ms wait
+    const started = performance.now();
+    await expect(p).rejects.toMatchObject({ reason: 'cancelled' });
+    expect(performance.now() - started).toBeLessThan(400);
+    expect(calls).toBe(1);
+    expect(b.refunded).toBe(0); // a request did reach Handla
   });
 });

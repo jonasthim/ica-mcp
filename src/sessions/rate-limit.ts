@@ -19,6 +19,11 @@ export function createTokenBucket(o: { capacity?: number; refillPerSecond?: numb
       buckets.set(key, { tokens: tokens - 1, at: t });
       return { ok: true };
     },
+    /** Give back one token taken by `take` (a call that ended without asking ICA, e.g. refused while queued). Never above capacity. */
+    refund(key: string): void {
+      const b = buckets.get(key);
+      if (b) b.tokens = Math.min(capacity, b.tokens + 1);
+    },
   };
 }
 export type TokenBucket = ReturnType<typeof createTokenBucket>;

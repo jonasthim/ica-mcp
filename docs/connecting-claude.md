@@ -78,7 +78,8 @@ session last.
 Messages that say "try again" need no reconnect: ICA did not answer or is limiting requests, ica-hub's per-user limit
 on ICA calls is used up (the message says for how many seconds), Handla is still preparing results, Handla's bot
 protection is blocking price lookups for a while (the message says for about how many minutes; ICA lists, offers and
-bonus still work), or ica-hub is restarting.
+bonus still work), Handla lookups are paced to a few per minute (the message says when to try the rest; earlier
+results are cached, and each Handla answer carries `asOf`, when Handla was asked), or ica-hub is restarting.
 
 ## Disconnecting Claude
 

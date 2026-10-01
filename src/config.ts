@@ -93,9 +93,10 @@ export type Config = {
    * The process-wide Handla guard (src/ica/handla-guard.ts): `cooldownMinutes` (ICA_HUB_HANDLA_COOLDOWN_MINUTES,
    * 1–60, default 10) — how long Handla calls are refused after an AWS WAF stop, doubled per failed probe up to 60;
    * `minGapMs` (ICA_HUB_HANDLA_MIN_GAP_MS, 0–60000, default 2500) — minimum time between two Handla request starts;
-   * `cacheMinutes` (ICA_HUB_HANDLA_CACHE_MINUTES, 0–1440, default 15) — product search cache TTL, 0 turns the cache off.
+   * `maxPerMinute` (ICA_HUB_HANDLA_MAX_PER_MINUTE, 1–60, default 8) — at most this many Handla request starts per rolling
+   * 60 s; `cacheMinutes` (ICA_HUB_HANDLA_CACHE_MINUTES, 0–1440, default 15) — product search cache TTL, 0 turns the cache off.
    */
-  handla: { cooldownMinutes: number; minGapMs: number; cacheMinutes: number };
+  handla: { cooldownMinutes: number; minGapMs: number; maxPerMinute: number; cacheMinutes: number };
 };
 
 /** An integer env setting in [min, max]; unset or blank is `dflt`. */
@@ -178,6 +179,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     handla: {
       cooldownMinutes: intSetting('ICA_HUB_HANDLA_COOLDOWN_MINUTES', env.ICA_HUB_HANDLA_COOLDOWN_MINUTES, 10, 1, 60),
       minGapMs: intSetting('ICA_HUB_HANDLA_MIN_GAP_MS', env.ICA_HUB_HANDLA_MIN_GAP_MS, 2500, 0, 60_000),
+      maxPerMinute: intSetting('ICA_HUB_HANDLA_MAX_PER_MINUTE', env.ICA_HUB_HANDLA_MAX_PER_MINUTE, 8, 1, 60),
       cacheMinutes: intSetting('ICA_HUB_HANDLA_CACHE_MINUTES', env.ICA_HUB_HANDLA_CACHE_MINUTES, 15, 0, 1440),
     },
   };

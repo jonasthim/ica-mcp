@@ -259,33 +259,51 @@ unhealthy only once a tool call fails.
 
 Handla (`handla_find_stores`, `handla_search_products`) sits behind CloudFront + AWS WAF with a rate rule per source
 IP: about 7 searches within about 15 s and every Handla request from the hub's IP is refused for many minutes (live,
-2026-10-01). The hub therefore treats Handla as one unit for the whole process:
+2026-10-01; see docs/api-notes.md → "Handla: AWS WAF" for what is measured and what is assumed). The hub therefore
+treats Handla as one unit for the whole process:
 
-- **Detection.** A WAF challenge (a 202 with `x-amzn-waf-action`) or a CloudFront 403 "Request blocked" is reported to
-  Claude at once as "Handla's bot protection is blocking price lookups for a while … Try again in about N minutes.
-  ICA lists, offers and bonus are not affected." It is never polled.
+- **Detection.** A WAF challenge (`x-amzn-waf-action` on any answer, live a 202) or a WAF block (a 403 with an
+  `x-amzn-waf-*` header or CloudFront's small "Request blocked" page) is reported to Claude at once as "Handla's bot
+  protection is blocking price lookups for a while … Try again in about N minutes. ICA lists, offers and bonus are not
+  affected." It is never polled. Any other 403 (an unknown store, say, even with `server: CloudFront`) is an ordinary
+  refusal and never opens the breaker, so no tool input can block Handla for the household.
 - **Circuit breaker.** After a WAF stop every Handla call that the cache cannot answer fails at once for a cooldown,
-  without contacting Handla and without spending the user's ICA budget token. When it ends, exactly one call is let through as a probe: an answer
-  closes the breaker; another WAF stop reopens it with the cooldown doubled (up to 60 minutes). Each change is logged
-  once at warn as `{ handla: 'blocked' | 'probe' | 'recovered', cooldownMinutes }`. `get_session_status` reports
+  without contacting Handla and without spending the user's ICA budget token. When it ends, exactly one call is let
+  through as a probe: an answer closes the breaker; another WAF stop reopens it with the cooldown doubled, up to 60
+  minutes (so `ICA_HUB_HANDLA_COOLDOWN_MINUTES=60` means no doubling). Each change is logged once at warn as
+  `{ handla: 'blocked' | 'probe' | 'recovered', cooldownMinutes }`. `get_session_status` reports
   `handla: { blocked, retryInMinutes? }`.
-- **Pacing.** Handla requests start at least the minimum gap apart (one queue for the whole process, including the
-  short retries of a plain 202). At most 10 wait (a worst wait of about 25 s); more fail at once with "Too many
-  Handla lookups queued; try fewer items at once." A queued call whose MCP request was cancelled is dropped; the 15 s request timeout starts only when
-  the request leaves the queue.
-- **Cache.** Successful answers are kept in memory: a product search per (store, query ignoring case and extra spaces,
-  limit) for the cache TTL, a store search per postcode for 24 h, at most 500 entries. A cache hit makes no Handla
-  request but still spends one ICA budget token, like any tool call (one call, one token). Cached answers are served
-  even while the breaker is open, since they need no Handla request.
+- **Pacing.** One queue for the whole process: request starts at least the minimum gap apart **and** at most
+  `ICA_HUB_HANDLA_MAX_PER_MINUTE` starts in any rolling 60 s. A plain 202's two short retries (0.5 s, then 1 s) rejoin
+  the queue like any request. A call that would wait more than 20 s for its turn is refused at once: "Handla lookups
+  are paced to N per minute to avoid ICA's bot protection. Try the remaining items in about S seconds. Earlier results
+  are cached for 15 minutes." (logged as `reason: 'rate-limited'`, no HTTP status), so Claude can pace itself or
+  summarise what it has. At most 10 wait; more fail with "Too many Handla lookups queued; try fewer items at once." A
+  queued call whose MCP request was cancelled is dropped (`reason: 'cancelled'`); the 15 s request timeout starts only
+  when the request leaves the queue. At shutdown queued calls are refused as "ica-hub is restarting".
+- **Cache.** Successful answers are kept in memory, only as the fields the tools return plus `asOf` (when Handla was
+  asked, so Claude can say how old a price is): a product search per (store, query ignoring case and extra spaces,
+  limit) for the cache TTL, a store search per postcode for 24 h, at most 500 entries. Identical lookups in flight at
+  the same time share one request. Cached answers are served even while the breaker is open and never count toward
+  the per-minute window.
+- **Budget.** One tool call spends one ICA budget token, also when the cache answers it. A call that ends without any
+  request reaching Handla — refused by the pacing or the queue bound, dropped as cancelled, refused at shutdown, or
+  joined to another caller's identical lookup that failed — gets its token back. A call refused by the open breaker
+  never takes one.
+- **Privacy note.** The cache is shared by the household: a member can notice (from a faster answer or an older
+  `asOf`) that someone else searched the same store and query in the last 15 minutes. Set
+  `ICA_HUB_HANDLA_CACHE_MINUTES=0` if that matters.
 
 | Variable | Default | Allowed | Effect |
 | --- | --- | --- | --- |
-| `ICA_HUB_HANDLA_COOLDOWN_MINUTES` | `10` | 1–60 | First cooldown after a WAF stop; doubled after each failed probe, up to 60. |
+| `ICA_HUB_HANDLA_COOLDOWN_MINUTES` | `10` | 1–60 | First cooldown after a WAF stop; doubled after each failed probe, up to 60 (60: no doubling). |
 | `ICA_HUB_HANDLA_MIN_GAP_MS` | `2500` | 0–60000 | Minimum time between two Handla request starts. |
+| `ICA_HUB_HANDLA_MAX_PER_MINUTE` | `8` | 1–60 | At most this many Handla request starts per rolling 60 s (a conservative default while the WAF window is measured). |
 | `ICA_HUB_HANDLA_CACHE_MINUTES` | `15` | 0–1440 | Product search cache TTL; `0` turns the whole Handla cache off (store search too). |
 
 Unset or empty means the default; any other value stops the hub at start-up with a configuration error. The state is
-in memory: a restart closes the breaker and empties the cache (the WAF itself may still be refusing the IP).
+in memory: a restart closes the breaker and empties the cache (the WAF itself may still be refusing the IP). All of
+its timing uses a monotonic clock, so a wall-clock step does not shorten or extend a cooldown.
 
 ### ICA app DCR secret (optional)
 

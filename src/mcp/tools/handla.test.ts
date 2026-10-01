@@ -1,6 +1,9 @@
+import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { FAKE_SECRETS } from '../../ica/test-fakes.js';
+import { appKeeper } from '../../server.js';
 import { startToolTest, type ToolTest } from '../../test-helpers.js';
+import { registerHandlaTools } from './handla.js';
 
 let s: ToolTest;
 beforeAll(async () => { s = await startToolTest(); });
@@ -9,7 +12,8 @@ afterAll(async () => { await s.close(); });
 describe('Handla tools', () => {
   it('finds Handla stores by zip, marking delivery and pickup, without addresses; no ICA account needed', async () => {
     const r = await s.carol.client.call('handla_find_stores', { zip: '123 45' });
-    expect(r.json).toEqual({ zip: '12345', stores: [
+    expect(Date.parse((r.json as { asOf: string }).asOf)).not.toBeNaN();
+    expect(r.json).toEqual({ zip: '12345', asOf: expect.any(String), stores: [
       { id: 'HS-1001', name: 'ICA Kvantum Testköping', city: 'Testköping', delivery: true, pickup: true },
       { id: 'HS-1002', name: 'ICA Nära Fakeby', city: 'Fakeby', delivery: true, pickup: false },
     ] });
@@ -18,7 +22,7 @@ describe('Handla tools', () => {
 
   it('searches a store\'s online prices', async () => {
     const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk', limit: 5 });
-    expect(r.json).toEqual({ store: 'HS-1001', query: 'mjölk', products: [
+    expect(r.json).toEqual({ store: 'HS-1001', query: 'mjölk', asOf: expect.any(String), products: [
       { id: 'p-1', name: 'Mellanmjölk 1,5%', brand: 'Arla', size: '1 l', price: '15.90 SEK', unitPrice: '15.90 SEK per fop.price.per.litre', available: true },
       { id: 'p-2', name: 'Laktosfri mjölk', brand: 'Arla Ko', size: '1 l', price: '19.50 SEK', unitPrice: '19.50 SEK per fop.price.per.litre', available: false },
     ] });
@@ -76,6 +80,88 @@ describe('Handla tools', () => {
       const r = await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
       expect(r.text).toMatch(/Try again in \d+ s/);
     } finally { await tight.close(); }
+  });
+});
+
+describe('Handla tools: privacy', () => {
+  const keysOf = (v: unknown): string[] =>
+    Array.isArray(v) ? v.flatMap(keysOf) : v && typeof v === 'object' ? Object.entries(v).flatMap(([k, x]) => [k, ...keysOf(x)]) : [];
+  const ALLOWED: Record<string, { args: Record<string, unknown>; keys: string[] }> = {
+    handla_find_stores: { args: { zip: '12345' }, keys: ['zip', 'asOf', 'stores', 'id', 'name', 'city', 'delivery', 'pickup'] },
+    handla_search_products: { args: { store: 'HS-1001', query: 'mjölk' }, keys: ['store', 'query', 'asOf', 'products', 'id', 'name', 'brand', 'size', 'price', 'unitPrice', 'available'] },
+  };
+  for (const [tool, { args, keys }] of Object.entries(ALLOWED)) {
+    it(`${tool} returns only its named fields (fresh and cached alike), with asOf`, async () => {
+      for (const round of ['fresh or cached', 'cached']) {
+        const r = await s.bob.client.call(tool, args);
+        expect(r.isError, round).toBeFalsy();
+        expect([...new Set(keysOf(r.json))].filter((k) => !keys.includes(k)), round).toEqual([]);
+        expect(r.text, round).not.toContain(FAKE_SECRETS.street);
+        expect(r.text, round).not.toContain('images.example');
+      }
+    });
+  }
+
+  it('a cached answer keeps the asOf of when Handla was asked', async () => {
+    const a = (await s.bob.client.call('handla_search_products', { store: 'HS-1001', query: 'filmjölk' })).json as { asOf: string };
+    await new Promise((r) => setTimeout(r, 5));
+    const b = (await s.bob.client.call('handla_search_products', { store: 'HS-1001', query: 'filmjölk' })).json as { asOf: string };
+    expect(b.asOf).toBe(a.asOf);
+  });
+});
+
+describe('Handla tools: pacing, origin refusals and cancellation', () => {
+  it('past the per-minute window: the pacing text (no HTTP status), reason rate-limited logged, budget refunded', async () => {
+    const w = await startToolTest({ env: { ICA_HUB_HANDLA_MAX_PER_MINUTE: '2' }, icaRateLimit: { capacity: 3, refillPerSecond: 0.001 } });
+    try {
+      for (const q of ['a', 'b']) expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: q })).isError).toBe(false);
+      const r = await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'c' });
+      expect(r).toMatchObject({ isError: true, text: "Handla lookups are paced to 2 per minute to avoid ICA's bot protection. Try the remaining items in about 60 seconds. Earlier results are cached for 15 minutes." });
+      const line = w.logs.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.msg === 'tool call').at(-1);
+      expect(line).toMatchObject({ status: 'IcaUnavailable', reason: 'rate-limited' });
+      expect(line).not.toHaveProperty('httpStatus');
+      expect(w.fake.seen.handlaRequests).toHaveLength(2);
+      // The refused call's token was refunded: the third token still answers a cached search.
+      expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'a' })).isError).toBe(false);
+    } finally { await w.close(); }
+  });
+
+  it('a bad store id answered with an origin 403 through CloudFront never opens the breaker', async () => {
+    const w = await startToolTest();
+    try {
+      w.fake.opts.handlaUnknownStore403 = true;
+      for (let i = 0; i < 3; i += 1) {
+        const r = await w.carol.client.call('handla_search_products', { store: 'HS-NOPE', query: 'mjölk' });
+        expect(r).toMatchObject({ isError: true, text: 'ICA rejected the request (HTTP 403).' });
+      }
+      expect((await w.carol.client.call('get_session_status')).json).toMatchObject({ handla: { blocked: false } });
+      expect((await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
+    } finally { await w.close(); }
+  });
+
+  it('after keeper.beginClosing (graceful shutdown) Handla calls are refused as restarting, before any request', async () => {
+    const w = await startToolTest();
+    try {
+      appKeeper(w.t.app).beginClosing();
+      const r = await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      expect(r).toMatchObject({ isError: true, text: 'ica-hub is restarting; try again in a moment.' });
+      expect(w.fake.seen.handlaRequests).toHaveLength(0);
+    } finally { await w.close(); }
+  });
+
+  it('a cancelled MCP request: the queued Handla call is dropped as `cancelled`, nothing is sent, the log says so', async () => {
+    const handlers = new Map<string, (args: unknown, ctx: unknown) => Promise<CallToolResult>>();
+    const server = { registerTool: (name: string, _c: unknown, h: (args: unknown, ctx: unknown) => Promise<CallToolResult>) => { handlers.set(name, h); } } as unknown as McpServer;
+    const logged: Record<string, unknown>[] = [];
+    const log = { info: (o: object) => { logged.push(o as Record<string, unknown>); }, warn: () => undefined, error: () => undefined };
+    registerHandlaTools(server, { config: s.t.config, db: s.t.db, keeper: appKeeper(s.t.app), log } as never);
+    const before = s.fake.seen.handlaRequests.length;
+    const c = new AbortController();
+    c.abort();
+    const r = await handlers.get('handla_search_products')!({ store: 'HS-1001', query: 'kvarg', limit: 10 }, { http: { authInfo: { extra: { userId: s.carol.id } } }, mcpReq: { signal: c.signal } });
+    expect(r).toMatchObject({ isError: true, content: [{ type: 'text', text: 'The request was cancelled before ICA answered.' }] });
+    expect(s.fake.seen.handlaRequests).toHaveLength(before);
+    expect(logged.at(-1)).toMatchObject({ tool: 'handla_search_products', status: 'IcaUnavailable', reason: 'cancelled' });
   });
 });
 

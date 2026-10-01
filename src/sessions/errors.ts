@@ -1,4 +1,4 @@
-import { IcaRejected, IcaUnavailable } from '../ica/errors.js';
+import { HandlaPaced, IcaRejected, IcaUnavailable } from '../ica/errors.js';
 
 export { IcaUnavailable, IcaRejected };
 
@@ -57,6 +57,10 @@ export function sessionErrorText(err: unknown, publicUrl: string): string | unde
     return `ICA shows purchase history only for a while after a web BankID login${level}. It ends on its own after somewhere between half an hour and a few hours, and at once when app access is connected with BankID. Open ${admin} and choose "Reconnect with BankID" (after any app access reconnect), then ask again.`;
   }
   if (err instanceof RateLimited) return `ica-hub limits ICA requests per user to protect your ICA account. Try again in ${err.retryAfterSeconds} s.`;
+  if (err instanceof HandlaPaced) {
+    const cache = err.cacheMinutes > 0 ? ` Earlier results are cached for ${err.cacheMinutes} minutes.` : '';
+    return `Handla lookups are paced to ${err.perMinute} per minute to avoid ICA's bot protection. Try the remaining items in about ${err.retryAfterSeconds ?? 60} seconds.${cache}`;
+  }
   if (err instanceof IcaUnavailable) {
     switch (err.reason) {
       case 'geo-blocked': return 'ICA refused the request because ica-hub is not reaching it from a Swedish IP address (HTTP 451). The hub operator has to fix the network.';
@@ -71,6 +75,7 @@ export function sessionErrorText(err: unknown, publicUrl: string): string | unde
         const minutes = Math.max(1, Math.ceil((err.retryAfterSeconds ?? 600) / 60));
         return `Handla's bot protection is blocking price lookups for a while (too many searches in a short time). Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}. ICA lists, offers and bonus are not affected.`;
       }
+      case 'cancelled': return 'The request was cancelled before ICA answered.';
       case 'queue-full': return 'Too many Handla lookups queued; try fewer items at once. ICA lists, offers and bonus are not affected.';
     }
   }

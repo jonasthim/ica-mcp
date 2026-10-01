@@ -104,6 +104,11 @@ export type FakeIcaOptions = {
    * `block` — 403, `server: CloudFront`, an HTML "Request blocked" page, no WAF header (a plain client). Undefined: off.
    */
   handlaWaf: 'challenge' | 'block' | undefined;
+  /**
+   * An unknown store's product search answers 403 with a JSON body and the CloudFront headers (`server: CloudFront`,
+   * `x-cache: Error from cloudfront`) CloudFront adds to any origin 4xx — not a WAF stop. False: a plain 404.
+   */
+  handlaUnknownStore403: boolean;
   /** App authorize answers 400 `invalid_client` for these client ids (a DCR client ICA no longer knows). */
   rejectClientIds: string[];
   /** /oauth/v2/authorize waits for this promise before answering (its path is recorded in `seen.paths` on arrival). */
@@ -151,7 +156,7 @@ export async function startFakeIca(overrides: Partial<FakeIcaOptions> = {}): Pro
     pendingPolls: 2, loginState: 2, firstName: FAKE_SECRETS.firstName, autoStart: undefined, waitBroken: false, routes: {},
     form1Action: undefined, doneLocation: undefined, callbackLocation: undefined, userInfo: undefined,
     appFinalLocation: undefined, appExpiresIn: 1800, refreshInvalid: false, mobileAcceptsWebBearer: true,
-    webTokenExpires: new Date(Date.now() + 3_600_000).toISOString(), rotateCookie: false, gatewayFailures: [], extraAppBearers: [], appLists: undefined, appSyncIgnored: false, cpaForbidden: false, holdUserInfo: undefined, handlaPending: 0, handlaWaf: undefined, rejectClientIds: [], holdAuthorize: undefined, holdRefresh: undefined, webSubject: undefined, ...overrides,
+    webTokenExpires: new Date(Date.now() + 3_600_000).toISOString(), rotateCookie: false, gatewayFailures: [], extraAppBearers: [], appLists: undefined, appSyncIgnored: false, cpaForbidden: false, holdUserInfo: undefined, handlaPending: 0, handlaWaf: undefined, handlaUnknownStore403: false, rejectClientIds: [], holdAuthorize: undefined, holdRefresh: undefined, webSubject: undefined, ...overrides,
   };
   const seen: FakeIca['seen'] = { authorizeQuery: undefined, waitCalls: 0, launchBody: undefined, form1Body: undefined, bearers: [], paths: [], gatewayCalls: [], tokenGrants: [], userInfoCalls: 0, syncBodies: [], createBodies: [], searchQueries: [], handlaRequests: [] };
   const app: FakeIca['app'] = { accessToken: FAKE_SECRETS.appAccessToken, refreshToken: FAKE_SECRETS.appRefreshToken, rotations: 0 };
@@ -321,6 +326,10 @@ export async function startFakeIca(overrides: Partial<FakeIcaOptions> = {}): Pro
         if (opts.handlaWaf === 'block') { res.writeHead(403, { server: 'CloudFront', 'x-cache': 'Error from cloudfront', 'content-type': 'text/html' }).end('<HTML><HEAD><TITLE>ERROR: The request could not be satisfied</TITLE></HEAD><BODY><H1>403 ERROR</H1><H2>Request blocked.</H2></BODY></HTML>'); return; }
         if (url.pathname.startsWith('/stores/') && opts.handlaPending > 0) { opts.handlaPending -= 1; res.writeHead(202).end(); return; }
         if (known) { send(known); return; }
+        if (opts.handlaUnknownStore403 && url.pathname.startsWith('/stores/')) {
+          res.writeHead(403, { 'content-type': 'application/json', server: 'CloudFront', 'x-cache': 'Error from cloudfront' }).end(JSON.stringify({ error: 'forbidden' }));
+          return;
+        }
       }
       json(res, 404, { error: 'not found' });
     })();

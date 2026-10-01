@@ -475,17 +475,19 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
       status: (adminUrl: string): Promise<SessionStatus> => statusFor(userId, adminUrl),
       handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => {
         // The API spends the token itself: after a cache hit (served even while the breaker is open), or after the
-        // breaker check for a miss, so a call the open breaker refuses spends nothing.
-        return fn(createHandlaApi({ endpoints, guard: handlaGuard, charge: () => { take(userId); }, ...(deps.handlaSleep ? { sleep: deps.handlaSleep } : {}) }));
+        // breaker check for a miss, so a call the open breaker refuses spends nothing; a miss that never reached
+        // Handla (refused or dropped while queued) is refunded.
+        return fn(createHandlaApi({ endpoints, guard: handlaGuard, charge: () => { take(userId); return () => { limiter.refund(userId); }; }, ...(deps.handlaSleep ? { sleep: deps.handlaSleep } : {}) }));
       },
     };
   }
 
   /**
    * The graceful shutdown's first step (at the signal): from now on no new app refresh or web jar use starts (they
-   * throw IcaUnavailable('shutting-down')); in-flight ones finish and can still be joined. Not undone.
+   * throw IcaUnavailable('shutting-down')); in-flight ones finish and can still be joined. Queued Handla requests are
+   * rejected with 'shutting-down' and no new one starts. Not undone.
    */
-  function beginClosing(): void { closing = true; }
+  function beginClosing(): void { closing = true; handlaGuard.close(); }
 
   /**
    * Resolves when no app refresh, web check or web jar use (held or queued) is in flight, whatever their outcomes:

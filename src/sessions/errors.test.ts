@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { IcaRejected, IcaUnavailable } from '../ica/errors.js';
+import { HandlaPaced, IcaRejected, IcaUnavailable } from '../ica/errors.js';
 import { NeedsAppReconnect, NeedsFreshBankId, NeedsWebReconnect, NotLinked, RateLimited, problemOf, sessionErrorText } from './errors.js';
 
 const URL_ = 'https://ica.example.com';
@@ -49,6 +49,14 @@ describe('sessionErrorText', () => {
     expect(problemOf(new IcaUnavailable('blocked', 202, [], 540))).toEqual({ kind: 'transient', detail: 'blocked by Handla bot protection' });
     expect(sessionErrorText(new IcaUnavailable('queue-full'), URL_)).toBe('Too many Handla lookups queued; try fewer items at once. ICA lists, offers and bonus are not affected.');
     expect(problemOf(new IcaUnavailable('queue-full'))).toEqual({ kind: 'transient', detail: 'queue-full' });
+  });
+
+  it('Handla pacing: says the per-minute pace, when to try the rest, and the cache; ICA 429 keeps its own text', () => {
+    expect(sessionErrorText(new HandlaPaced(43, 8, 15), URL_)).toBe("Handla lookups are paced to 8 per minute to avoid ICA's bot protection. Try the remaining items in about 43 seconds. Earlier results are cached for 15 minutes.");
+    expect(sessionErrorText(new HandlaPaced(43, 8, 0), URL_)).toBe("Handla lookups are paced to 8 per minute to avoid ICA's bot protection. Try the remaining items in about 43 seconds.");
+    expect(sessionErrorText(new IcaUnavailable('rate-limited', 429), URL_)).toContain('HTTP 429');
+    expect(problemOf(new HandlaPaced(43, 8, 15))).toEqual({ kind: 'transient', detail: 'rate-limited' });
+    expect(sessionErrorText(new IcaUnavailable('cancelled'), URL_)).toBe('The request was cancelled before ICA answered.');
   });
 
   it('knows nothing about other errors', () => {

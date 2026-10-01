@@ -35,9 +35,10 @@ services:
       ICA_HUB_LIST_WRITES: ${ICA_HUB_LIST_WRITES:-}
       # Optional: app-token upkeep, interval (default: refresh about every 10 minutes) or on-demand. Empty = default.
       ICA_HUB_APP_UPKEEP: ${ICA_HUB_APP_UPKEEP:-}
-      # Optional: Handla rate protection (docs/deployment.md). Empty = default (10 min, 2500 ms, 15 min).
+      # Optional: Handla rate protection (docs/deployment.md). Empty = default (10 min, 2500 ms, 8/min, 15 min).
       ICA_HUB_HANDLA_COOLDOWN_MINUTES: ${ICA_HUB_HANDLA_COOLDOWN_MINUTES:-}
       ICA_HUB_HANDLA_MIN_GAP_MS: ${ICA_HUB_HANDLA_MIN_GAP_MS:-}
+      ICA_HUB_HANDLA_MAX_PER_MINUTE: ${ICA_HUB_HANDLA_MAX_PER_MINUTE:-}
       ICA_HUB_HANDLA_CACHE_MINUTES: ${ICA_HUB_HANDLA_CACHE_MINUTES:-}
     volumes: ["ica-hub-data:/data"]
 volumes:

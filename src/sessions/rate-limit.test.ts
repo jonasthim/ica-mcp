@@ -38,4 +38,18 @@ describe('createTokenBucket', () => {
     expect(() => createTokenBucket({ capacity: 0.5 })).toThrow(/capacity/);
     expect(() => createTokenBucket({ refillPerSecond: Number.NaN })).toThrow(/refillPerSecond/);
   });
+
+  it('refund gives one token back, never above capacity', () => {
+    const b = createTokenBucket({ capacity: 2, refillPerSecond: 0.001, now: () => 0 });
+    expect(b.take('u').ok).toBe(true);
+    expect(b.take('u').ok).toBe(true);
+    expect(b.take('u').ok).toBe(false);
+    b.refund('u');
+    expect(b.take('u').ok).toBe(true);
+    b.refund('u'); b.refund('u'); b.refund('u');
+    expect(b.take('u').ok).toBe(true);
+    expect(b.take('u').ok).toBe(true);
+    expect(b.take('u').ok).toBe(false);
+    b.refund('nobody'); // unknown key: no-op
+  });
 });

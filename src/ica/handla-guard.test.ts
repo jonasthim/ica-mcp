@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { IcaRejected, IcaUnavailable } from './errors.js';
+import { HandlaPaced, IcaRejected, IcaUnavailable } from './errors.js';
 import { createHandlaGuard, type HandlaGuardOptions } from './handla-guard.js';
 
 const MIN = 60_000;
@@ -125,14 +125,14 @@ describe('Handla pacing', () => {
   });
 
   it('bounds the queue: past 10 waiting, a call fails fast as queue-full without sending', async () => {
-    const g = guard({ minGapMs: 2500 });
+    const g = guard({ minGapMs: 100, maxPerMinute: 60 });
     const sends: number[] = [];
     const accepted = Array.from({ length: 11 }, (_, i) => g.request(() => { sends.push(i); return fine(); })); // 1 goes now, 10 wait
     expect(g.queued()).toBe(10);
     const extra = vi.fn(fine);
     expect(await err(g.request(extra))).toMatchObject({ name: 'IcaUnavailable', reason: 'queue-full' });
     expect(extra).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(11 * 2500);
+    await vi.advanceTimersByTimeAsync(11 * 100);
     await Promise.all(accepted);
     expect(sends).toHaveLength(11);
   });
@@ -145,7 +145,7 @@ describe('Handla pacing', () => {
     const p = err(g.request(send, c.signal));
     expect(g.queued()).toBe(1);
     c.abort(new DOMException('gone', 'AbortError'));
-    expect(await p).toMatchObject({ name: 'IcaUnavailable', reason: 'network' });
+    expect(await p).toMatchObject({ name: 'IcaUnavailable', reason: 'cancelled' });
     expect(g.queued()).toBe(0);
     await vi.advanceTimersByTimeAsync(5000);
     expect(send).not.toHaveBeenCalled();
@@ -220,5 +220,123 @@ describe('Handla cache', () => {
     await g.cached('stores', 'k', load);
     await g.cached('search', 'k', load);
     expect(load).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('Handla pacing: sliding window of starts per minute', () => {
+  it('at most maxPerMinute starts per rolling 60 s; a call that would wait over 20 s fails fast with HandlaPaced', async () => {
+    const g = guard({ minGapMs: 0, maxPerMinute: 8 });
+    const send = vi.fn(fine);
+    for (let i = 0; i < 8; i += 1) await g.request(send);
+    expect(send).toHaveBeenCalledTimes(8);
+    const e = await err(g.request(send));
+    expect(e).toBeInstanceOf(HandlaPaced);
+    expect(e).toMatchObject({ name: 'IcaUnavailable', reason: 'rate-limited', retryAfterSeconds: 60, perMinute: 8, cacheMinutes: 15, status: undefined });
+    expect(send).toHaveBeenCalledTimes(8);
+    expect(g.queued()).toBe(0);
+    vi.advanceTimersByTime(45_000); // the oldest start frees its slot in 15 s: short enough to queue
+    const p = g.request(send);
+    expect(g.queued()).toBe(1);
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(send).toHaveBeenCalledTimes(8);
+    await vi.advanceTimersByTimeAsync(1);
+    await p;
+    expect(send).toHaveBeenCalledTimes(9);
+  });
+
+  it('keeps the gap too: 8 starts 2.5 s apart, then the 9th must wait for the window (42.5 s): refused with the seconds left', async () => {
+    const g = guard({ minGapMs: 2500, maxPerMinute: 8 });
+    const t0 = performance.now();
+    const starts: number[] = [];
+    const all = Promise.all(Array.from({ length: 8 }, () => g.request(() => { starts.push(performance.now() - t0); return fine(); })));
+    await vi.advanceTimersByTimeAsync(17_500);
+    await all;
+    expect(starts).toEqual([0, 2500, 5000, 7500, 10_000, 12_500, 15_000, 17_500]);
+    expect(await err(g.request(fine))).toMatchObject({ reason: 'rate-limited', retryAfterSeconds: 43 });
+  });
+
+  it('a gap longer than the 20 s wait limit is refused the same way', async () => {
+    const g = guard({ minGapMs: 25_000 });
+    await g.request(fine);
+    expect(await err(g.request(fine))).toMatchObject({ reason: 'rate-limited', retryAfterSeconds: 25 });
+  });
+});
+
+describe('Handla guard: monotonic clock', () => {
+  it('a wall clock stepping backwards (or forwards) changes neither the cooldown, the pacing nor the cache TTL', async () => {
+    const g = createHandlaGuard({ minGapMs: 2500 }); // default clock: performance.now
+    await g.cached('search', 'k', () => Promise.resolve('v'));
+    await err(g.request(stop));
+    expect(g.status()).toEqual({ blocked: true, retryInMinutes: 10 });
+    vi.setSystemTime(Date.now() - 24 * 3_600_000); // NTP step back a day
+    expect(g.status()).toEqual({ blocked: true, retryInMinutes: 10 });
+    vi.setSystemTime(Date.now() + 48 * 3_600_000); // and a day forward
+    expect(g.status()).toEqual({ blocked: true, retryInMinutes: 10 });
+    expect(g.peek('search', 'k')).toEqual({ value: 'v' });
+    vi.advanceTimersByTime(10 * MIN);
+    expect(g.status()).toEqual({ blocked: false });
+    const send = vi.fn(fine);
+    await g.request(send); // the probe: goes at once (the gap is long past on the monotonic clock)
+    expect(send).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(5 * MIN);
+    expect(g.peek('search', 'k')).toBeUndefined(); // 15 min after caching, whatever the wall clock did
+  });
+
+  it('an injected clock that steps backwards never makes a request wait for the past gap forever', async () => {
+    let clock = 1_000_000;
+    const g = createHandlaGuard({ minGapMs: 2500, maxPerMinute: 60, now: () => clock });
+    await g.request(fine);
+    clock -= 3_600_000; // a broken clock: an hour back
+    expect(await err(g.request(fine))).toMatchObject({ reason: 'rate-limited' }); // refused fast, not hung
+  });
+});
+
+describe('Handla guard: shutdown and single-flight', () => {
+  it('close() rejects queued requests with shutting-down and refuses new ones; nothing is sent', async () => {
+    const g = guard({ minGapMs: 2500 });
+    await g.request(fine);
+    const send = vi.fn(fine);
+    const queued = [err(g.request(send)), err(g.request(send))];
+    expect(g.queued()).toBe(2);
+    g.close();
+    for (const q of queued) expect(await q).toMatchObject({ reason: 'shutting-down' });
+    expect(await err(g.request(send))).toMatchObject({ reason: 'shutting-down' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('identical misses in flight share one load', async () => {
+    const g = guard();
+    let release!: (v: string) => void;
+    const load = vi.fn(() => new Promise<string>((r) => { release = r; }));
+    const a = g.cached('search', 'k', load);
+    const b = g.cached('search', 'k', load);
+    release('v');
+    expect(await Promise.all([a, b])).toEqual(['v', 'v']);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('a joiner whose shared load was cancelled by its first caller loads itself', async () => {
+    const g = guard();
+    let cancel!: (e: unknown) => void;
+    const first = err(g.cached('search', 'k', () => new Promise<string>((_r, j) => { cancel = j; })));
+    const own = vi.fn(() => Promise.resolve('mine'));
+    const joiner = g.cached('search', 'k', own);
+    cancel(new IcaUnavailable('cancelled'));
+    expect(await first).toMatchObject({ reason: 'cancelled' });
+    expect(await joiner).toBe('mine');
+    expect(own).toHaveBeenCalledTimes(1);
+  });
+
+  it('a joiner shares any other failure', async () => {
+    const g = guard();
+    let fail!: (e: unknown) => void;
+    const first = err(g.cached('search', 'k', () => new Promise<string>((_r, j) => { fail = j; })));
+    const own = vi.fn(() => Promise.resolve('mine'));
+    const joiner = err(g.cached('search', 'k', own));
+    fail(new IcaUnavailable('not-ready'));
+    expect(await first).toMatchObject({ reason: 'not-ready' });
+    expect(await joiner).toMatchObject({ reason: 'not-ready' });
+    expect(own).not.toHaveBeenCalled();
   });
 });
