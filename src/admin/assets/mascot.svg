@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 140" width="120" height="140" role="img" aria-labelledby="mascot-title">
+<title id="mascot-title">ICA-MCP mascot: a friendly robot shopkeeper in a green apron with an MCP name badge, holding a clipboard</title>
+<ellipse cx="60" cy="134" rx="30" ry="4" fill="#22332a" opacity=".16"/>
+<g stroke="#22332a" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+<path d="M60 26V15" fill="none" stroke-width="7"/>
+<path d="M60 26V15" fill="none" stroke="#c9d4c8"/>
+<circle cx="60" cy="11" r="5" fill="#e2b24a"/>
+<rect x="42" y="116" width="13" height="16" rx="5" fill="#c9d4c8"/>
+<rect x="65" y="116" width="13" height="16" rx="5" fill="#c9d4c8"/>
+<rect x="52" y="66" width="16" height="10" rx="2" fill="#c9d4c8"/>
+<path d="M32 88Q20 84 18 71" fill="none" stroke-width="10"/>
+<path d="M32 88Q20 84 18 71" fill="none" stroke="#e4ebe3" stroke-width="4"/>
+<circle cx="17" cy="66" r="6.5" fill="#e4ebe3"/>
+<rect x="28" y="74" width="64" height="48" rx="16" fill="#e4ebe3"/>
+<path d="M44 77 50 71M76 77 70 71" fill="none" stroke="#2f7a5c"/>
+<path d="M43 78H77V95L84 100V112Q84 118 78 118H42Q36 118 36 112V100L43 95Z" fill="#2f7a5c"/>
+<path d="M50 104H70V110Q70 113 67 113H53Q50 113 50 110Z" fill="none" stroke-width="2"/>
+<rect x="47" y="81" width="26" height="12" rx="3" fill="#fbfcf8" stroke-width="2"/>
+<path d="M50 90V84L52.5 87.5 55 84V90M62.2 85Q61 84 59.8 84 57.2 84 57.2 87 57.2 90 59.8 90 61 90 62.2 89M64.5 90V84H67Q69.5 84 69.5 86 69.5 88 67 88H64.5" fill="none" stroke-width="1.5"/>
+<g transform="rotate(8 100 100)">
+<rect x="88" y="82" width="24" height="32" rx="3" fill="#e2b24a"/>
+<rect x="91" y="87" width="18" height="24" rx="1.5" fill="#fbfcf8" stroke-width="1.5"/>
+<rect x="95" y="79" width="10" height="6" rx="2" fill="#22332a"/>
+<path d="M94 94l2 2 3-4M94 101l2 2 3-4" fill="none" stroke="#2f7a5c" stroke-width="1.8"/>
+<path d="M101 95h5M101 102h5M94.5 108h11" fill="none" stroke-width="1.5"/>
+</g>
+<path d="M88 88Q97 92 94 102" fill="none" stroke-width="10"/>
+<path d="M88 88Q97 92 94 102" fill="none" stroke="#e4ebe3" stroke-width="4"/>
+<circle cx="93.5" cy="105" r="6" fill="#e4ebe3"/>
+<rect x="21" y="39" width="11" height="17" rx="4" fill="#c9d4c8"/>
+<rect x="88" y="39" width="11" height="17" rx="4" fill="#c9d4c8"/>
+<rect x="28" y="24" width="64" height="46" rx="18" fill="#e4ebe3"/>
+<rect x="36" y="32" width="48" height="30" rx="11" fill="#22332a"/>
+<path d="M44 48Q48 42 52 48M68 48Q72 42 76 48M54 53Q60 58 66 53" fill="none" stroke="#8fe0b6"/>
+</g>
+<circle cx="42.5" cy="55" r="3" fill="#f0a58c" opacity=".85"/>
+<circle cx="77.5" cy="55" r="3" fill="#f0a58c" opacity=".85"/>
+<path d="M36 30Q33 32 32.5 36" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" opacity=".8"/>
+</svg>

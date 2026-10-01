@@ -1,0 +1,31 @@
+[Unit]
+Description=ica-hub MCP + admin server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ica-hub
+Group=ica-hub
+WorkingDirectory=/opt/ica-hub
+EnvironmentFile=/etc/ica-hub/env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+# The graceful shutdown on SIGTERM takes up to 20 s (in-flight requests, then any ICA token refresh still running,
+# whose rotated refresh token must be stored); give it room before SIGKILL.
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ica-hub
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,75 @@
+# Prometheus alert rules for ica-hub. Load with `rule_files:` and check with `promtool check rules`;
+# `promtool test rules ica-hub-alerts.test.yml` runs the unit tests beside it.
+#
+# `account` is a 12-hex-digit one-way hash of ica-hub's own random ICA-account uuid (see docs/deployment.md);
+# no account id, ICA id, user id, email or name is exported.
+#
+# An empty result is not evidence of health unless the series is known to exist: every "nothing is wrong" rule
+# below also fires when the per-session gauge it reads is absent although sessions exist
+# (`ica_hub_ica_sessions`, which always exports its zeros), and IcaHubDown fires when the always-present
+# series themselves are absent.
+groups:
+  - name: ica-hub
+    rules:
+      - alert: IcaHubDown
+        expr: absent(ica_hub_build_info) or absent(ica_hub_ica_sessions) or absent(ica_hub_ica_app_upkeep_enabled)
+        for: 10m
+        annotations:
+          summary: ica-hub metrics are missing (service down, not scraped, or the ICA session gauges are gone)
+      - alert: IcaHubIcaSessionUnhealthy
+        expr: >-
+          ica_hub_ica_session_healthy == 0
+          or (absent(ica_hub_ica_session_healthy) and on() (sum(ica_hub_ica_sessions) > 0))
+        for: 1h
+        annotations:
+          summary: An ICA{{ with $labels.kind }} {{ . }}{{ end }} session has recorded an error for an hour; see /admin/ica (reconnect with BankID if it says so)
+          description: '{{ if not $labels.kind }}ICA sessions exist but ica_hub_ica_session_healthy is missing.{{ end }}'
+      - alert: IcaHubAppTokenExpired
+        expr: >-
+          (ica_hub_ica_session_expires_timestamp_seconds{kind="app"} < time() - 600
+            and on() (ica_hub_ica_app_upkeep_enabled == 1))
+          or (absent(ica_hub_ica_session_expires_timestamp_seconds{kind="app"}) and on() (sum(ica_hub_ica_sessions{kind="app"}) > 0))
+        for: 20m
+        annotations:
+          summary: An ICA app token has been expired for half an hour although the upkeep refreshes it about every 10 minutes; see /admin/ica
+          description: >-
+            Also fires for a session that needs a BankID reconnect, on purpose (the user-facing symptom). Not evaluated
+            with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is expected to expire.{{ if not $labels.account }}
+            App sessions exist but their expiry gauge is missing.{{ end }}
+      - alert: IcaHubAppTokenExpiresSoon
+        expr: >-
+          (
+            ((ica_hub_ica_session_expires_timestamp_seconds{kind="app"} - time() < 12 * 3600)
+              and on (account, kind) (ica_hub_ica_session_expires_timestamp_seconds{kind="app"} > time())
+              and on (account) (ica_hub_ica_app_window_end_timestamp_seconds < time() - 1800))
+            or (absent(ica_hub_ica_app_window_end_timestamp_seconds) and on() (sum(ica_hub_ica_sessions{kind="app"}) > 0))
+          )
+          and on() (ica_hub_ica_app_upkeep_enabled == 1)
+        for: 1h
+        annotations:
+          summary: Past its 4-hour window the ICA app token should last about 30 days, but it expires within 12 h
+          description: >-
+            An already expired token is left to IcaHubAppTokenExpired. Not evaluated with ICA_HUB_APP_UPKEEP=on-demand,
+            where an unused token is not refreshed.{{ if not $labels.account }} App sessions exist but the window-end
+            gauge is missing.{{ end }}
+      - alert: IcaHubAppRefreshStale
+        expr: >-
+          (
+            ((time() - ica_hub_ica_app_last_refresh_timestamp_seconds > 1800)
+              and on (account) (ica_hub_ica_session_healthy{kind="app"} == 1))
+            or (absent(ica_hub_ica_app_last_refresh_timestamp_seconds) and on() (sum(ica_hub_ica_sessions{kind="app",health="ok"}) > 0))
+          )
+          and on() (ica_hub_ica_app_upkeep_enabled == 1)
+        for: 15m
+        annotations:
+          summary: A healthy ICA app session has not been refreshed for over 45 minutes; the upkeep (about every 10 minutes) is not running
+          description: >-
+            Not evaluated with ICA_HUB_APP_UPKEEP=on-demand.{{ if not $labels.account }} Healthy app sessions exist but
+            the last-refresh gauge is missing.{{ end }}
+      - alert: IcaHubWebSessionExpiresSoon
+        expr: >-
+          ica_hub_ica_session_expires_timestamp_seconds{kind="web"} - time() < 7 * 86400
+          or (absent(ica_hub_ica_session_expires_timestamp_seconds{kind="web"}) and on() (sum(ica_hub_ica_sessions{kind="web"}) > 0))
+        annotations:
+          summary: The ICA web session (about 89 days) ends within a week; reconnect with BankID on /admin/ica
+          description: '{{ if not $labels.account }}Web sessions exist but their expiry gauge is missing.{{ end }}'

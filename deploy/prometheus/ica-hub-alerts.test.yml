@@ -1,0 +1,308 @@
+# Unit tests for ica-hub-alerts.yml:
+#   promtool test rules deploy/prometheus/ica-hub-alerts.test.yml
+rule_files:
+  - ica-hub-alerts.yml
+evaluation_interval: 1m
+
+tests:
+  # Healthy: the upkeep refreshes the app token all the time (last refresh = now), the web session has weeks left.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="web",health="ok"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="app"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="web"}
+        values: '1x200'
+      - series: ica_hub_ica_app_last_refresh_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0+60x200'
+      - series: ica_hub_ica_app_window_end_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="app"}
+        values: '2592000+60x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="web"}
+        values: '7000000x200'
+    alert_rule_test:
+      - { eval_time: 3h, alertname: IcaHubDown, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubIcaSessionUnhealthy, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubAppTokenExpired, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubAppTokenExpiresSoon, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubAppRefreshStale, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubWebSessionExpiresSoon, exp_alerts: [] }
+
+  # The upkeep stopped: the healthy app token was last refreshed at 0 and expired at 900 s (inside its window).
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="app"}
+        values: '1x200'
+      - series: ica_hub_ica_app_last_refresh_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x200'
+      - series: ica_hub_ica_app_window_end_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '14400x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="app"}
+        values: '900x200'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: IcaHubAppRefreshStale
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: IcaHubAppRefreshStale
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6 }
+            exp_annotations:
+              summary: A healthy ICA app session has not been refreshed for over 45 minutes; the upkeep (about every 10 minutes) is not running
+              description: Not evaluated with ICA_HUB_APP_UPKEEP=on-demand.
+      - eval_time: 50m
+        alertname: IcaHubAppTokenExpired
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: app }
+            exp_annotations:
+              summary: An ICA app token has been expired for half an hour although the upkeep refreshes it about every 10 minutes; see /admin/ica
+              description: Also fires for a session that needs a BankID reconnect, on purpose (the user-facing symptom). Not evaluated with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is expected to expire.
+
+  # Past the window the token should last ~30 days; this one has 6 h left and is not expired.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="app"}
+        values: '1x200'
+      - series: ica_hub_ica_app_last_refresh_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0+60x200'
+      - series: ica_hub_ica_app_window_end_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="app"}
+        values: '21600+60x200'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: IcaHubAppTokenExpiresSoon
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: app }
+            exp_annotations:
+              summary: Past its 4-hour window the ICA app token should last about 30 days, but it expires within 12 h
+              description: An already expired token is left to IcaHubAppTokenExpired. Not evaluated with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is not refreshed.
+
+  # A dead session past its window (needs a BankID reconnect, token long expired): Unhealthy and Expired only,
+  # not ExpiresSoon (no third page) and not RefreshStale (it is not healthy).
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="reconnect"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="app"}
+        values: '0x200'
+      - series: ica_hub_ica_app_last_refresh_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x200'
+      - series: ica_hub_ica_app_window_end_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="app"}
+        values: '900x200'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: IcaHubIcaSessionUnhealthy
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: app }
+            exp_annotations:
+              summary: An ICA app session has recorded an error for an hour; see /admin/ica (reconnect with BankID if it says so)
+              description: ''
+      - eval_time: 2h
+        alertname: IcaHubAppTokenExpired
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: app }
+            exp_annotations:
+              summary: An ICA app token has been expired for half an hour although the upkeep refreshes it about every 10 minutes; see /admin/ica
+              description: Also fires for a session that needs a BankID reconnect, on purpose (the user-facing symptom). Not evaluated with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is expected to expire.
+      - { eval_time: 2h, alertname: IcaHubAppTokenExpiresSoon, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubAppRefreshStale, exp_alerts: [] }
+
+  # ICA_HUB_APP_UPKEEP=on-demand: an unused token is not refreshed, so none of the upkeep-dependent app alerts fire.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x400'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '0x400'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x400'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="app"}
+        values: '1x400'
+      - series: ica_hub_ica_app_last_refresh_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x400'
+      - series: ica_hub_ica_app_window_end_timestamp_seconds{account="a1b2c3d4e5f6"}
+        values: '0x400'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="app"}
+        values: '21600x400'
+    alert_rule_test:
+      - { eval_time: 3h, alertname: IcaHubAppRefreshStale, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubAppTokenExpired, exp_alerts: [] }
+      - { eval_time: 3h, alertname: IcaHubAppTokenExpiresSoon, exp_alerts: [] }
+      - { eval_time: 6h, alertname: IcaHubAppTokenExpired, exp_alerts: [] }
+
+  # On-demand, and a healthy app session has no last-refresh gauge: the absent() guard of RefreshStale stays quiet too.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '0x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x200'
+    alert_rule_test:
+      - { eval_time: 2h, alertname: IcaHubAppRefreshStale, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubAppTokenExpiresSoon, exp_alerts: [] }
+
+  # absent() guards: sessions exist (the counts say so) but the per-session gauges are gone.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="web",health="ok"}
+        values: '1x200'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: IcaHubIcaSessionUnhealthy
+        exp_alerts:
+          - exp_annotations:
+              summary: An ICA session has recorded an error for an hour; see /admin/ica (reconnect with BankID if it says so)
+              description: ICA sessions exist but ica_hub_ica_session_healthy is missing.
+      - eval_time: 2h
+        alertname: IcaHubAppTokenExpired
+        exp_alerts:
+          - exp_labels: { kind: app }
+            exp_annotations:
+              summary: An ICA app token has been expired for half an hour although the upkeep refreshes it about every 10 minutes; see /admin/ica
+              description: Also fires for a session that needs a BankID reconnect, on purpose (the user-facing symptom). Not evaluated with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is expected to expire. App sessions exist but their expiry gauge is missing.
+      - eval_time: 2h
+        alertname: IcaHubAppTokenExpiresSoon
+        exp_alerts:
+          - exp_annotations:
+              summary: Past its 4-hour window the ICA app token should last about 30 days, but it expires within 12 h
+              description: An already expired token is left to IcaHubAppTokenExpired. Not evaluated with ICA_HUB_APP_UPKEEP=on-demand, where an unused token is not refreshed. App sessions exist but the window-end gauge is missing.
+      - eval_time: 2h
+        alertname: IcaHubAppRefreshStale
+        exp_alerts:
+          - exp_annotations:
+              summary: A healthy ICA app session has not been refreshed for over 45 minutes; the upkeep (about every 10 minutes) is not running
+              description: Not evaluated with ICA_HUB_APP_UPKEEP=on-demand. Healthy app sessions exist but the last-refresh gauge is missing.
+      - eval_time: 2h
+        alertname: IcaHubWebSessionExpiresSoon
+        exp_alerts:
+          - exp_labels: { kind: web }
+            exp_annotations:
+              summary: The ICA web session (about 89 days) ends within a week; reconnect with BankID on /admin/ica
+              description: Web sessions exist but their expiry gauge is missing.
+
+  # No ICA account linked yet (the counts are all zero): nothing fires.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '0x200'
+      - series: ica_hub_ica_sessions{kind="web",health="ok"}
+        values: '0x200'
+    alert_rule_test:
+      - { eval_time: 2h, alertname: IcaHubDown, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubIcaSessionUnhealthy, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubAppTokenExpired, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubAppTokenExpiresSoon, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubAppRefreshStale, exp_alerts: [] }
+      - { eval_time: 2h, alertname: IcaHubWebSessionExpiresSoon, exp_alerts: [] }
+
+  # Metrics missing: nothing scraped at all, or the hub is up but the session gauges are gone.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IcaHubDown
+        exp_alerts:
+          - exp_annotations:
+              summary: ica-hub metrics are missing (service down, not scraped, or the ICA session gauges are gone)
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x60'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IcaHubDown
+        exp_alerts:
+          - exp_annotations:
+              summary: ica-hub metrics are missing (service down, not scraped, or the ICA session gauges are gone)
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x60'
+      - series: ica_hub_ica_sessions{kind="app",health="ok"}
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IcaHubDown
+        exp_alerts:
+          - exp_annotations:
+              summary: ica-hub metrics are missing (service down, not scraped, or the ICA session gauges are gone)
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: IcaHubDown
+        exp_alerts:
+          - exp_annotations:
+              summary: ica-hub metrics are missing (service down, not scraped, or the ICA session gauges are gone)
+
+  # A web session recorded broken, ending in 3 days.
+  - interval: 1m
+    input_series:
+      - series: ica_hub_build_info{version="1.0.0"}
+        values: '1x200'
+      - series: ica_hub_ica_app_upkeep_enabled
+        values: '1x200'
+      - series: ica_hub_ica_sessions{kind="web",health="error"}
+        values: '1x200'
+      - series: ica_hub_ica_session_healthy{account="a1b2c3d4e5f6",kind="web"}
+        values: '0x200'
+      - series: ica_hub_ica_session_expires_timestamp_seconds{account="a1b2c3d4e5f6",kind="web"}
+        values: '259200x200'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: IcaHubIcaSessionUnhealthy
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: web }
+            exp_annotations:
+              summary: An ICA web session has recorded an error for an hour; see /admin/ica (reconnect with BankID if it says so)
+              description: ''
+      - eval_time: 1m
+        alertname: IcaHubWebSessionExpiresSoon
+        exp_alerts:
+          - exp_labels: { account: a1b2c3d4e5f6, kind: web }
+            exp_annotations:
+              summary: The ICA web session (about 89 days) ends within a week; reconnect with BankID on /admin/ica
+              description: ''

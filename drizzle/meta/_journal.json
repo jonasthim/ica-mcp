@@ -1,0 +1,69 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1790693907937,
+      "tag": "0000_outstanding_the_liberteens",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790694260120,
+      "tag": "0001_cheerful_sphinx",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790700418729,
+      "tag": "0002_blushing_susan_delgado",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790714768203,
+      "tag": "0003_roles-to-user",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790714786431,
+      "tag": "0004_phase1-5-users-audit-invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790742986326,
+      "tag": "0005_phase1-6-settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790760929289,
+      "tag": "0006_phase2-session-times",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790767964196,
+      "tag": "0007_phase2-login-state",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790776655390,
+      "tag": "0008_phase2-ica-subjects",
+      "breakpoints": true
+    }
+  ]
+}

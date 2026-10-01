@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+spike/out/
+*.har
+.env
+.env.*
+!.env.example
+
+# Claude Code agent worktrees
+.claude/
+
+# Local planning artefacts (never published)
+.superpowers/

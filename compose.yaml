@@ -1,0 +1,37 @@
+services:
+  ica-hub:
+    image: ghcr.io/jonasthim/ica-hub:latest
+    restart: unless-stopped
+    # The graceful shutdown takes up to 20 s (in-flight requests, then any ICA token refresh still running, whose
+    # rotated refresh token must be stored). Docker's default of 10 s would SIGKILL it and could force a BankID reconnect.
+    stop_grace_period: 30s
+    ports: ["3000:3000"]
+    environment:
+      ICA_HUB_URL: ${ICA_HUB_URL:?set to the public https origin}
+      ICA_HUB_MASTER_KEY: ${ICA_HUB_MASTER_KEY:?openssl rand -base64 32}
+      ICA_HUB_AUTH_SECRET: ${ICA_HUB_AUTH_SECRET:?openssl rand -base64 32}
+      # Optional, first start only: creates the first admin when the database has no users yet. Ignored as soon as
+      # any user exists. Remove both after the first start, or leave them unset and use /admin/setup instead.
+      ICA_HUB_ADMIN_EMAIL: ${ICA_HUB_ADMIN_EMAIL:-}
+      ICA_HUB_ADMIN_PASSWORD: ${ICA_HUB_ADMIN_PASSWORD:-}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      # Single sign-on (e.g. Authentik), optional. Setting these makes the connection read-only on the Settings
+      # page ("managed by the environment"); leave them unset to configure it there instead.
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_LABEL: ${OIDC_LABEL:-}
+      OIDC_LINK_BY_EMAIL: ${OIDC_LINK_BY_EMAIL:-}
+      OIDC_ADMIN_GROUP: ${OIDC_ADMIN_GROUP:-}
+      OIDC_MEMBER_GROUP: ${OIDC_MEMBER_GROUP:-}
+      AUTH_LOCAL_LOGIN: ${AUTH_LOCAL_LOGIN:-}
+      # Optional: a setup code you choose (12-64 letters/digits), accepted by first-run setup besides the one
+      # logged at startup.
+      ICA_HUB_SETUP_CODE: ${ICA_HUB_SETUP_CODE:-}
+      # Optional: who may use the shopping-list write tools: off (default), all, or comma-separated hub user emails.
+      ICA_HUB_LIST_WRITES: ${ICA_HUB_LIST_WRITES:-}
+      # Optional: app-token upkeep, interval (default: refresh about every 10 minutes) or on-demand. Empty = default.
+      ICA_HUB_APP_UPKEEP: ${ICA_HUB_APP_UPKEEP:-}
+    volumes: ["ica-hub-data:/data"]
+volumes:
+  ica-hub-data:
