@@ -2,6 +2,26 @@
 
 All notable changes to ica-mcp (the `ica-hub` package) are listed here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.2.2 — 2026-10-01
+
+### Fixed
+- Handla: an AWS WAF stop is no longer treated as "still preparing". Handla sits behind CloudFront + AWS WAF with a
+  per-IP rate rule (about 7 searches in about 15 s trips it for many minutes). A WAF challenge (202 with
+  `x-amzn-waf-action`) or a CloudFront 403 "Request blocked" is now reported at once as Handla's bot protection
+  blocking price lookups, with the time left, instead of being polled for about 7 s (which likely kept the rule
+  tripped). The `tool call` log line carries `reason: 'blocked'`.
+- A plain 202 without a WAF header is retried only twice (0.5 s, then 1 s; `Retry-After` honoured up to 2 s).
+
+### Added
+- Handla circuit breaker, one per process: after a WAF stop every Handla call fails at once for a cooldown (10 min,
+  doubled per failed probe up to 60 min) without contacting Handla or spending the user's ICA budget; then exactly one
+  probe goes through. `ICA_HUB_HANDLA_COOLDOWN_MINUTES`. Breaker changes are logged at warn.
+- Handla pacing: one queue for the process, request starts at least 2.5 s apart, at most 20 waiting
+  (`ICA_HUB_HANDLA_MIN_GAP_MS`).
+- Handla cache: successful product searches for 15 min and store searches for 24 h, 500 entries
+  (`ICA_HUB_HANDLA_CACHE_MINUTES`; 0 turns it off). A cache hit still spends one ICA budget token.
+- `get_session_status` reports `handla: { blocked, retryInMinutes? }`.
+
 ## 0.2.1 — 2026-10-01
 
 ### Fixed

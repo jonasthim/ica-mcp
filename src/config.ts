@@ -89,7 +89,23 @@ export type Config = {
    * uses them). 'on-demand' is the R-C5 fallback if an app refresh turns out to end web purchase history.
    */
   appUpkeep: AppUpkeepMode;
+  /**
+   * The process-wide Handla guard (src/ica/handla-guard.ts): `cooldownMinutes` (ICA_HUB_HANDLA_COOLDOWN_MINUTES,
+   * 1–60, default 10) — how long Handla calls are refused after an AWS WAF stop, doubled per failed probe up to 60;
+   * `minGapMs` (ICA_HUB_HANDLA_MIN_GAP_MS, 0–60000, default 2500) — minimum time between two Handla request starts;
+   * `cacheMinutes` (ICA_HUB_HANDLA_CACHE_MINUTES, 0–1440, default 15) — product search cache TTL, 0 turns the cache off.
+   */
+  handla: { cooldownMinutes: number; minGapMs: number; cacheMinutes: number };
 };
+
+/** An integer env setting in [min, max]; unset or blank is `dflt`. */
+function intSetting(name: string, raw: string | undefined, dflt: number, min: number, max: number): number {
+  const v = (raw ?? '').trim();
+  if (v === '') return dflt;
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || n < min || n > max) throw new ConfigError(`${name} must be a whole number from ${min} to ${max}`);
+  return n;
+}
 
 export type AppUpkeepMode = 'interval' | 'on-demand';
 
@@ -159,5 +175,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): Config {
     icaAppDcrClientSecret: env.ICA_APP_DCR_CLIENT_SECRET || DEFAULT_ICA_APP_DCR_CLIENT_SECRET,
     listWrites: listWrites(env.ICA_HUB_LIST_WRITES),
     appUpkeep: appUpkeep(env.ICA_HUB_APP_UPKEEP),
+    handla: {
+      cooldownMinutes: intSetting('ICA_HUB_HANDLA_COOLDOWN_MINUTES', env.ICA_HUB_HANDLA_COOLDOWN_MINUTES, 10, 1, 60),
+      minGapMs: intSetting('ICA_HUB_HANDLA_MIN_GAP_MS', env.ICA_HUB_HANDLA_MIN_GAP_MS, 2500, 0, 60_000),
+      cacheMinutes: intSetting('ICA_HUB_HANDLA_CACHE_MINUTES', env.ICA_HUB_HANDLA_CACHE_MINUTES, 15, 0, 1440),
+    },
   };
 }

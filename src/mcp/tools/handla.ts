@@ -4,9 +4,13 @@ import type { HandlaProduct, HandlaStore } from '../../ica/handla-api.js';
 import { compact } from './format.js';
 import { ok, runTool, type ToolDeps } from './runtime.js';
 
+/** The MCP request's abort signal (the client cancelled or went away): a Handla call still queued is then dropped. */
+const signalOf = (ctx: unknown): AbortSignal | undefined => (ctx as { mcpReq?: { signal?: AbortSignal } } | undefined)?.mcpReq?.signal;
+
 /*
  * Handla's store search and product search are anonymous: no ICA account, no cart, no login (that stays Phase 4).
- * A call still spends one of the caller's ICA budget tokens (session.handla), so Claude cannot hammer Handla.
+ * A call still spends one of the caller's ICA budget tokens (session.handla), so Claude cannot hammer Handla. Handla
+ * sits behind AWS WAF with a per-IP rate rule; the keeper's Handla guard paces, caches and stops after a WAF block.
  *
  * Privacy: every output below is built field by field from named, typed fields. Never spread an ICA object: the
  * schemas are loose, so a spread would pass through whatever Handla adds (a store's street/phone/e-mail, a product's
@@ -43,7 +47,7 @@ export function registerHandlaTools(server: McpServer, deps: ToolDeps): void {
     annotations: { readOnlyHint: true },
   }, async ({ zip }, ctx) => runTool(deps, ctx, 'handla_find_stores', async (session) => {
     const z5 = zip.replace(' ', '');
-    const r = await session.handla((api) => api.stores(z5));
+    const r = await session.handla((api) => api.stores(z5, { signal: signalOf(ctx) }));
     const byId = new Map<string, { store: HandlaStore; delivery: boolean; pickup: boolean }>();
     for (const st of r.forHomeDelivery) byId.set(st.accountId, { store: st, delivery: true, pickup: false });
     for (const st of r.forPickupDelivery) { const e = byId.get(st.accountId); if (e) e.pickup = true; else byId.set(st.accountId, { store: st, delivery: false, pickup: true }); }
@@ -55,7 +59,7 @@ export function registerHandlaTools(server: McpServer, deps: ToolDeps): void {
     inputSchema: z.object({ store: HANDLA_STORE_ID, query: z.string().trim().min(1).max(60), limit: z.number().int().min(1).max(25).default(10) }),
     annotations: { readOnlyHint: true },
   }, async ({ store, query, limit }, ctx) => runTool(deps, ctx, 'handla_search_products', async (session) => {
-    const products = await session.handla((api) => api.search(store, query, limit));
+    const products = await session.handla((api) => api.search(store, query, limit, { signal: signalOf(ctx) }));
     return ok({ store, query, products: products.slice(0, limit).map(productView) });
   }));
 }

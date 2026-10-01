@@ -44,7 +44,7 @@ export async function startTestApp(
   extraEnv: Record<string, string> = {},
   opts: { icaEndpoints?: IcaEndpoints; firstRun?: boolean; seed?: (db: Db, cipher: Cipher) => void; log?: Logger; settingsFetchLimit?: number;
     icaRateLimit?: { capacity: number; refillPerSecond: number };
-    /** Handla's 202-poll waits; defaults to real timers (src/server.ts's default) when omitted. */
+    /** Handla's plain-202 retry waits; defaults to real timers (src/server.ts's default) when omitted. */
     handlaSleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<TestCtx> {
@@ -291,13 +291,14 @@ export type ToolTest = { t: TestCtx; fake: FakeIca; logs: string[]; alice: ToolT
  * A fake ICA (lists, plus `FAKE_ALL_ROUTES` (merged under `o.fake.routes`) — `FAKE_APP_ROUTES` for stores, offers, bonus and products, `FAKE_WEB_ROUTES` for article search — and whatever `o.fake` adds; the web bearer is refused on mobile/* like the real gateway), the
  * full app, and three hub users with real OAuth tokens from the whole Claude connection: alice and bob each linked to
  * their own ICA account (web + app; bob's app token lives an hour, so it never needs a refresh the fake could not
- * serve), carol not linked. All log lines are collected in `logs`. Handla's 202-poll waits are instant (real timers
- * would otherwise cost a test up to ~7 s to reach `IcaUnavailable('not-ready')`).
+ * serve), carol not linked. All log lines are collected in `logs`. Handla's plain-202 retry waits are instant and its
+ * pacing gap is 0 (ICA_HUB_HANDLA_MIN_GAP_MS unless `env` sets it); its cache is on as in production.
  */
 export async function startToolTest(o: { fake?: Partial<FakeIcaOptions>; icaRateLimit?: { capacity: number; refillPerSecond: number }; env?: Record<string, string> } = {}): Promise<ToolTest> {
   const fake = await startFakeIca({ pendingPolls: 0, mobileAcceptsWebBearer: false, appLists: fakeHouseholdLists(), extraAppBearers: [FAKE_SECRETS.appAccessTokenB], ...o.fake, routes: { ...FAKE_ALL_ROUTES, ...o.fake?.routes } });
   const logs: string[] = [];
-  const t = await startTestApp(o.env ?? {}, { icaEndpoints: fake.endpoints, log: captureLogs(logs), ...(o.icaRateLimit ? { icaRateLimit: o.icaRateLimit } : {}), handlaSleep: () => Promise.resolve() });
+  // No Handla pacing in tool tests (2.5 s between requests would make suites slow); a test that wants it sets the env.
+  const t = await startTestApp({ ICA_HUB_HANDLA_MIN_GAP_MS: '0', ...o.env }, { icaEndpoints: fake.endpoints, log: captureLogs(logs), ...(o.icaRateLimit ? { icaRateLimit: o.icaRateLimit } : {}), handlaSleep: () => Promise.resolve() });
   const make = async (email: string, name: string, app: AppState | null): Promise<ToolTestUser> => {
     const u = await createHubUser(t, { email, name });
     if (app) await linkFakeIca(t, fake, u, { app });

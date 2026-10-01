@@ -40,6 +40,17 @@ describe('sessionErrorText', () => {
     expect(sessionErrorText(new IcaUnavailable('not-ready'), URL_)).toBe('Handla is still preparing results; try again in a moment.');
   });
 
+  it('Handla bot protection: says how long, that ICA itself is unaffected, and never an HTTP status', () => {
+    const t = sessionErrorText(new IcaUnavailable('blocked', 202, [], 540), URL_)!;
+    expect(t).toBe("Handla's bot protection is blocking price lookups for a while (too many searches in a short time). Try again in about 9 minutes. ICA lists, offers and bonus are not affected.");
+    expect(sessionErrorText(new IcaUnavailable('blocked', undefined, [], 30), URL_)).toContain('Try again in about 1 minute.');
+    expect(sessionErrorText(new IcaUnavailable('blocked'), URL_)).toContain('Try again in about 10 minutes.');
+    expect(t).not.toMatch(/HTTP|202|reconnect/i);
+    expect(problemOf(new IcaUnavailable('blocked', 202, [], 540))).toEqual({ kind: 'transient', detail: 'blocked by Handla bot protection' });
+    expect(sessionErrorText(new IcaUnavailable('queue-full'), URL_)).toBe('Too many Handla lookups queued; try fewer items at once. ICA lists, offers and bonus are not affected.');
+    expect(problemOf(new IcaUnavailable('queue-full'))).toEqual({ kind: 'transient', detail: 'queue-full' });
+  });
+
   it('knows nothing about other errors', () => {
     expect(sessionErrorText(new Error('boom'), URL_)).toBeUndefined();
     expect(sessionErrorText('x', URL_)).toBeUndefined();

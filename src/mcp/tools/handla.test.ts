@@ -40,31 +40,86 @@ describe('Handla tools', () => {
     expect((await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
   });
 
-  it('Handla still preparing after every poll: says so and to try again, never an HTTP status', async () => {
-    s.fake.opts.handlaPending = 99; // far more pending answers than the poll budget (1 initial + 5 polls) allows
+  it('Handla still answering a plain 202 after the short retries: says so and to try again, never an HTTP status', async () => {
+    s.fake.opts.handlaPending = 99; // far more pending answers than the retries (1 initial + 2) allow
     try {
-      const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'grädde' }); // not cached by an earlier test
       expect(r).toMatchObject({ isError: true, text: 'Handla is still preparing results; try again in a moment.' });
     } finally { s.fake.opts.handlaPending = 0; }
   });
 
-  it('Handla still preparing for a few polls then answers: no error', async () => {
-    s.fake.opts.handlaPending = 3;
+  it('a plain 202 for a retry or two, then an answer: no error', async () => {
+    s.fake.opts.handlaPending = 2;
     try {
-      const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'smör' });
       expect(r.isError).toBeFalsy();
     } finally { s.fake.opts.handlaPending = 0; }
   });
 
-  it('several Handla polls behind one 202 still spend only one of the caller\'s ICA budget tokens', async () => {
+  it('the plain-202 retries behind one call still spend only one of the caller\'s ICA budget tokens', async () => {
     const tight = await startToolTest({ icaRateLimit: { capacity: 1, refillPerSecond: 0.001 } });
     try {
-      tight.fake.opts.handlaPending = 3;
+      tight.fake.opts.handlaPending = 2;
       expect((await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
-      const r = await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      const r = await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'ost' });
       expect(r.isError).toBe(true);
       expect(r.text).toMatch(/Try again in \d+ s/);
     } finally { await tight.close(); }
+  });
+
+  it('a cache hit makes no Handla request but still spends a budget token', async () => {
+    const tight = await startToolTest({ icaRateLimit: { capacity: 2, refillPerSecond: 0.001 } });
+    try {
+      expect((await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
+      expect((await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: ' Mjölk' })).isError).toBe(false);
+      expect(tight.fake.seen.handlaRequests).toHaveLength(1);
+      const r = await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      expect(r.text).toMatch(/Try again in \d+ s/);
+    } finally { await tight.close(); }
+  });
+});
+
+describe('Handla tools: AWS WAF stop', () => {
+  it('a WAF challenge: one request, the bot-protection text (no HTTP 202), reason blocked logged, breaker in session status', async () => {
+    const w = await startToolTest({ icaRateLimit: { capacity: 3, refillPerSecond: 0.001 } });
+    try {
+      w.fake.opts.handlaWaf = 'challenge';
+      const r = await w.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      expect(r).toMatchObject({ isError: true, text: "Handla's bot protection is blocking price lookups for a while (too many searches in a short time). Try again in about 10 minutes. ICA lists, offers and bonus are not affected." });
+      expect(r.text).not.toContain('202');
+      expect(r.text).not.toContain('HTTP');
+      expect(w.fake.seen.handlaRequests).toHaveLength(1);
+      const lines = w.logs.map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(lines.find((l) => l.msg === 'tool call' && l.tool === 'handla_search_products')).toMatchObject({ status: 'IcaUnavailable', reason: 'blocked', httpStatus: 202 });
+      expect(lines.filter((l) => l.handla !== undefined)).toEqual([expect.objectContaining({ level: 40, handla: 'blocked', cooldownMinutes: 10 })]);
+
+      // While open: no request reaches Handla (store search too) and no budget token is spent (capacity 3, 1 used).
+      w.fake.opts.handlaWaf = undefined;
+      for (let i = 0; i < 5; i += 1) {
+        const again = await w.carol.client.call(i % 2 ? 'handla_find_stores' : 'handla_search_products', i % 2 ? { zip: '12345' } : { store: 'HS-1001', query: 'mjölk' });
+        expect(again.text).toContain("Handla's bot protection");
+      }
+      expect(w.fake.seen.handlaRequests).toHaveLength(1);
+      const status = await w.carol.client.call('get_session_status');
+      expect(status.json).toMatchObject({ linked: false, handla: { blocked: true, retryInMinutes: 10 } });
+      // get_session_status spends nothing for an unlinked user; two tokens are left for ICA calls.
+      expect((await w.alice.client.call('get_session_status')).json).toMatchObject({ linked: true, handla: { blocked: true } });
+    } finally { await w.close(); }
+  });
+
+  it('a CloudFront 403 block is the same stop, not "refused the credential"', async () => {
+    const w = await startToolTest();
+    try {
+      w.fake.opts.handlaWaf = 'block';
+      const r = await w.alice.client.call('handla_find_stores', { zip: '12345' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toContain("Handla's bot protection is blocking price lookups");
+      expect(r.text).not.toContain('403');
+    } finally { await w.close(); }
+  });
+
+  it('session status reports Handla as not blocked normally', async () => {
+    expect((await s.carol.client.call('get_session_status')).json).toMatchObject({ handla: { blocked: false } });
   });
 });
 

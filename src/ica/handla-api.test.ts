@@ -1,14 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IcaEndpoints } from './endpoints.js';
-import { createHandlaApi } from './handla-api.js';
+import { createHandlaApi, isWafStop } from './handla-api.js';
+import { createHandlaGuard, type HandlaGuard } from './handla-guard.js';
 import type { Fetcher } from './gateway.js';
 import { FAKE_HANDLA_ROUTES, startFakeIca, type FakeIca } from './test-fakes.js';
 
 let fake: FakeIca;
-beforeEach(async () => { fake = await startFakeIca({ pendingPolls: 0, routes: FAKE_HANDLA_ROUTES }); });
+let guard: HandlaGuard;
+beforeEach(async () => { fake = await startFakeIca({ pendingPolls: 0, routes: FAKE_HANDLA_ROUTES }); guard = createHandlaGuard({ minGapMs: 0, cacheMinutes: 0 }); });
 afterEach(async () => { await fake.close(); });
-/** No real waits in this suite: pending-202 cases only exercise the retry *count*, never real timing. */
-const api = () => createHandlaApi({ endpoints: fake.endpoints, sleep: () => Promise.resolve() });
+/** No real waits in this suite: pending-202 cases only exercise the retry *count*, never real timing. No pacing, no cache. */
+const api = () => createHandlaApi({ endpoints: fake.endpoints, guard, sleep: () => Promise.resolve() });
 
 describe('Handla public API', () => {
   it('finds stores by zip, anonymously', async () => {
@@ -34,24 +36,101 @@ describe('Handla public API', () => {
   });
 });
 
-describe('Handla product search: 202 polling', () => {
-  it('polls through repeated 202s and succeeds once Handla answers', async () => {
-    fake.opts.handlaPending = 3;
+describe('Handla product search: a plain 202 (no WAF header)', () => {
+  it('is retried briefly and succeeds once Handla answers', async () => {
+    fake.opts.handlaPending = 2;
     expect(await api().search('HS-1001', 'mjölk')).toHaveLength(2);
-    expect(fake.seen.handlaRequests).toHaveLength(4); // 1 initial + 3 still-pending polls before the 4th answers 200
+    expect(fake.seen.handlaRequests).toHaveLength(3); // 1 initial + 2 retries
   });
 
-  it('still 202 after the last poll gives up as unavailable (not-ready, no HTTP status), bounded to 6 attempts total', async () => {
-    fake.opts.handlaPending = 99; // far more pending answers than the poll budget allows
+  it('still 202 after the two retries gives up as not-ready (no HTTP status): 3 requests, never more', async () => {
+    fake.opts.handlaPending = 99;
     const e = await api().search('HS-1001', 'mjölk').catch((err: unknown) => err);
     expect(e).toMatchObject({ name: 'IcaUnavailable', reason: 'not-ready' });
     expect((e as { status?: number }).status).toBeUndefined();
-    expect(fake.seen.handlaRequests).toHaveLength(6); // 1 initial + 5 polls, never more
+    expect(fake.seen.handlaRequests).toHaveLength(3);
+    expect(guard.status()).toEqual({ blocked: false }); // a plain 202 is not a WAF stop
+  });
+});
+
+describe('Handla: AWS WAF stops (fake server)', () => {
+  it('a WAF challenge (202 + x-amzn-waf-action) is a stop at once: exactly one request, no poll, breaker open', async () => {
+    fake.opts.handlaWaf = 'challenge';
+    const waits: number[] = [];
+    const e = await createHandlaApi({ endpoints: fake.endpoints, guard, sleep: (ms) => { waits.push(ms); return Promise.resolve(); } }).search('HS-1001', 'mjölk').catch((err: unknown) => err);
+    expect(e).toMatchObject({ name: 'IcaUnavailable', reason: 'blocked', status: 202, retryAfterSeconds: 600 });
+    expect(fake.seen.handlaRequests).toHaveLength(1);
+    expect(waits).toEqual([]);
+    expect(guard.status()).toEqual({ blocked: true, retryInMinutes: 10 });
+  });
+
+  it('a CloudFront 403 "Request blocked" is a stop (not IcaUnauthorized)', async () => {
+    fake.opts.handlaWaf = 'block';
+    await expect(api().search('HS-1001', 'mjölk')).rejects.toMatchObject({ name: 'IcaUnavailable', reason: 'blocked', status: 403 });
+    expect(fake.seen.handlaRequests).toHaveLength(1);
+  });
+
+  it('the store search is detected too, and shares the breaker with product search', async () => {
+    fake.opts.handlaWaf = 'block';
+    await expect(api().stores('12345')).rejects.toMatchObject({ reason: 'blocked' });
+    fake.opts.handlaWaf = undefined;
+    await expect(api().search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked' });
+    expect(fake.seen.handlaRequests).toHaveLength(1); // the second never reached Handla
+  });
+
+  it('breaker against the fake: one probe after the cooldown; stopped again doubles it, an answer closes it', async () => {
+    let clock = 0;
+    const g = createHandlaGuard({ minGapMs: 0, cacheMinutes: 0, now: () => clock });
+    const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve() });
+    fake.opts.handlaWaf = 'challenge';
+    await expect(a.search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked' });
+    clock += 9 * 60_000;
+    await expect(a.search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked', retryAfterSeconds: 60 });
+    expect(fake.seen.handlaRequests).toHaveLength(1);
+    clock += 60_000; // cooldown over: the next call is the one probe, and it is stopped again
+    await expect(a.search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked', retryAfterSeconds: 1200 });
+    expect(fake.seen.handlaRequests).toHaveLength(2);
+    expect(g.status()).toEqual({ blocked: true, retryInMinutes: 20 });
+    clock += 20 * 60_000;
+    fake.opts.handlaWaf = undefined;
+    expect(await a.search('HS-1001', 'mjölk')).toHaveLength(2);
+    expect(fake.seen.handlaRequests).toHaveLength(3);
+    expect(g.status()).toEqual({ blocked: false });
+  });
+
+  it('caches a search per (store, normalised query, max) and a store search per zip', async () => {
+    const g = createHandlaGuard({ minGapMs: 0 });
+    const a = createHandlaApi({ endpoints: fake.endpoints, guard: g, sleep: () => Promise.resolve() });
+    await a.search('HS-1001', 'Mjölk');
+    await a.search('HS-1001', '  mjölk ');
+    expect(fake.seen.handlaRequests).toHaveLength(1);
+    await a.search('HS-1001', 'mjölk', 5); // another max
+    await a.search('HS-1002', 'mjölk').catch(() => undefined); // another store (404 here)
+    expect(fake.seen.handlaRequests).toHaveLength(3);
+    await a.stores('12345'); await a.stores('12345');
+    expect(fake.seen.handlaRequests).toHaveLength(4);
+  });
+});
+
+describe('isWafStop', () => {
+  const html = '<html><body><h1>403 ERROR</h1>Request blocked.</body></html>';
+  it.each([
+    ['any status with x-amzn-waf-action', new Response(null, { status: 202, headers: { 'x-amzn-waf-action': 'challenge' } }), true],
+    ['a 200 with x-amzn-waf-action', new Response('{}', { status: 200, headers: { 'x-amzn-waf-action': 'captcha' } }), true],
+    ['403 with server: CloudFront', new Response('', { status: 403, headers: { server: 'CloudFront' } }), true],
+    ['403 with x-cache: Error from cloudfront', new Response('', { status: 403, headers: { 'x-cache': 'Error from cloudfront' } }), true],
+    ['403 with a small "Request blocked" body', new Response(html, { status: 403 }), true],
+    ['a plain 202', new Response(null, { status: 202 }), false],
+    ['a 403 from the origin (JSON)', new Response('{"error":"forbidden"}', { status: 403, headers: { 'content-type': 'application/json' } }), false],
+    ['a 403 whose large body mentions it', new Response(`${'x'.repeat(20_000)}Request blocked`, { status: 403 }), false],
+    ['a 200 from CloudFront', new Response('{}', { status: 200, headers: { server: 'CloudFront' } }), false],
+  ])('%s → %s', async (_name, r, expected) => {
+    expect(await isWafStop(r)).toBe(expected);
   });
 });
 
 /** Precise control over each answer's status and headers, for the Retry-After and mid-poll-failure cases the fake server can't drive. */
-describe('Handla product search: poll timing (mocked fetcher)', () => {
+describe('Handla product search: retry timing (mocked fetcher)', () => {
   const endpoints: IcaEndpoints = { ims: 'https://ims.example.com', web: 'https://www.example.com', gateway: 'https://gw.example.com', handla: 'https://handla.example.com', handlaStores: 'https://handla.example.com' };
   const okBody = JSON.stringify({ productGroups: [] });
   const sequence = (answers: Response[]): { fetcher: Fetcher; calls: () => number } => {
@@ -59,41 +138,82 @@ describe('Handla product search: poll timing (mocked fetcher)', () => {
     const fetcher: Fetcher = () => Promise.resolve(answers[Math.min(i++, answers.length - 1)]!);
     return { fetcher, calls: () => i };
   };
+  const make = (fetcher: Fetcher, waits: number[]) => createHandlaApi({ endpoints, fetcher, guard: createHandlaGuard({ minGapMs: 0, cacheMinutes: 0 }), sleep: (ms) => { waits.push(ms); return Promise.resolve(); } });
 
-  it('honours Retry-After (seconds) instead of the default schedule, capped at 3 s', async () => {
-    const { fetcher, calls } = sequence([
-      new Response(null, { status: 202, headers: { 'retry-after': '10' } }), // asks for 10 s; capped to 3 s
-      new Response(null, { status: 202, headers: { 'retry-after': '1' } }), // asks for 1 s; under the cap, honoured as-is
-      new Response(okBody, { status: 200 }),
-    ]);
+  it('waits 0.5 s then 1 s by default', async () => {
+    const { fetcher, calls } = sequence([new Response(null, { status: 202 }), new Response(null, { status: 202 }), new Response(null, { status: 202 })]);
     const waits: number[] = [];
-    const products = await createHandlaApi({ endpoints, fetcher, sleep: (ms) => { waits.push(ms); return Promise.resolve(); } }).search('HS-1001', 'mjölk');
-    expect(products).toEqual([]);
-    expect(waits).toEqual([3000, 1000]);
+    await expect(make(fetcher, waits).search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'not-ready' });
+    expect(waits).toEqual([500, 1000]);
     expect(calls()).toBe(3);
   });
 
-  it('falls back to the given poll schedule when there is no Retry-After', async () => {
-    const { fetcher } = sequence([
-      new Response(null, { status: 202 }),
-      new Response(null, { status: 202 }),
+  it('honours Retry-After (seconds), capped at 2 s', async () => {
+    const { fetcher, calls } = sequence([
+      new Response(null, { status: 202, headers: { 'retry-after': '10' } }), // asks for 10 s; capped to 2 s
+      new Response(null, { status: 202, headers: { 'retry-after': '1' } }), // under the cap, honoured as-is
       new Response(okBody, { status: 200 }),
     ]);
     const waits: number[] = [];
-    const products = await createHandlaApi({ endpoints, fetcher, pollDelaysMs: [10, 20, 30], sleep: (ms) => { waits.push(ms); return Promise.resolve(); } }).search('HS-1001', 'mjölk');
-    expect(products).toEqual([]);
-    expect(waits).toEqual([10, 20]);
+    expect(await make(fetcher, waits).search('HS-1001', 'mjölk')).toEqual([]);
+    expect(waits).toEqual([2000, 1000]);
+    expect(calls()).toBe(3);
   });
 
-  it('a 500 mid-poll surfaces as server-error immediately, with no further polling', async () => {
-    const { fetcher, calls } = sequence([
-      new Response(null, { status: 202 }),
-      new Response('boom', { status: 503 }),
-    ]);
+  it('a WAF challenge on a retry stops at once', async () => {
+    const { fetcher, calls } = sequence([new Response(null, { status: 202 }), new Response(null, { status: 202, headers: { 'x-amzn-waf-action': 'challenge' } })]);
     const waits: number[] = [];
-    const api2 = createHandlaApi({ endpoints, fetcher, sleep: (ms) => { waits.push(ms); return Promise.resolve(); } });
-    await expect(api2.search('HS-1001', 'mjölk')).rejects.toMatchObject({ name: 'IcaUnavailable', reason: 'server-error', status: 503 });
+    await expect(make(fetcher, waits).search('HS-1001', 'mjölk')).rejects.toMatchObject({ reason: 'blocked' });
     expect(calls()).toBe(2);
-    expect(waits).toEqual([500]); // the wait before the failing poll; none after it
+    expect(waits).toEqual([500]);
+  });
+
+  it('a 500 mid-retry surfaces as server-error immediately, with no further retry', async () => {
+    const { fetcher, calls } = sequence([new Response(null, { status: 202 }), new Response('boom', { status: 503 })]);
+    const waits: number[] = [];
+    await expect(make(fetcher, waits).search('HS-1001', 'mjölk')).rejects.toMatchObject({ name: 'IcaUnavailable', reason: 'server-error', status: 503 });
+    expect(calls()).toBe(2);
+    expect(waits).toEqual([500]);
+  });
+
+  it('a non-WAF 403 is still IcaUnauthorized-shaped as before (origin refusal)', async () => {
+    const { fetcher } = sequence([new Response('{"error":"x"}', { status: 403, headers: { 'content-type': 'application/json' } })]);
+    await expect(make(fetcher, []).search('HS-1001', 'mjölk')).rejects.toMatchObject({ name: 'IcaUnauthorized', status: 403 });
+  });
+});
+
+describe('Handla pacing (mocked fetcher, fake timers)', () => {
+  const endpoints: IcaEndpoints = { ims: 'https://ims.example.com', web: 'https://www.example.com', gateway: 'https://gw.example.com', handla: 'https://handla.example.com', handlaStores: 'https://handla.example.com' };
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('5 concurrent searches start at least 2.5 s apart, plain-202 retries included', async () => {
+    const starts: number[] = [];
+    let n = 0;
+    const fetcher: Fetcher = () => {
+      starts.push(Date.now());
+      n += 1;
+      return Promise.resolve(n === 1 ? new Response(null, { status: 202 }) : new Response(JSON.stringify({ productGroups: [] }), { status: 200 }));
+    };
+    const a = createHandlaApi({ endpoints, fetcher, guard: createHandlaGuard({ minGapMs: 2500, cacheMinutes: 0 }) }); // real (faked) sleeps
+    const all = Promise.all(['a', 'b', 'c', 'd', 'e'].map((q) => a.search('HS-1001', q)));
+    await vi.advanceTimersByTimeAsync(30_000);
+    await all;
+    expect(starts).toHaveLength(6); // 5 searches + 1 retry of the first
+    for (let i = 1; i < starts.length; i += 1) expect(starts[i]! - starts[i - 1]!).toBeGreaterThanOrEqual(2500);
+  });
+
+  it('the queue is bounded at 20 waiting: the next search fails fast as queue-full', async () => {
+    let sent = 0;
+    const fetcher: Fetcher = () => { sent += 1; return Promise.resolve(new Response(JSON.stringify({ productGroups: [] }), { status: 200 })); };
+    const g = createHandlaGuard({ minGapMs: 2500, cacheMinutes: 0 });
+    const a = createHandlaApi({ endpoints, fetcher, guard: g });
+    const accepted = Array.from({ length: 21 }, (_, i) => a.search('HS-1001', `q${i}`));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(g.queued()).toBe(20);
+    await expect(a.search('HS-1001', 'one too many')).rejects.toMatchObject({ reason: 'queue-full' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await Promise.all(accepted);
+    expect(sent).toBe(21);
   });
 });

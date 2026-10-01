@@ -255,6 +255,37 @@ alert rules that assume the upkeep (`IcaHubAppTokenExpired`, `IcaHubAppTokenExpi
 including their absent-gauge checks) stay quiet; an app session nobody uses is then expected to lapse, and shows as
 unhealthy only once a tool call fails.
 
+### Handla rate protection (optional)
+
+Handla (`handla_find_stores`, `handla_search_products`) sits behind CloudFront + AWS WAF with a rate rule per source
+IP: about 7 searches within about 15 s and every Handla request from the hub's IP is refused for many minutes (live,
+2026-10-01). The hub therefore treats Handla as one unit for the whole process:
+
+- **Detection.** A WAF challenge (a 202 with `x-amzn-waf-action`) or a CloudFront 403 "Request blocked" is reported to
+  Claude at once as "Handla's bot protection is blocking price lookups for a while … Try again in about N minutes.
+  ICA lists, offers and bonus are not affected." It is never polled.
+- **Circuit breaker.** After a WAF stop every Handla call fails at once for a cooldown, without contacting Handla and
+  without spending the user's ICA budget token. When it ends, exactly one call is let through as a probe: an answer
+  closes the breaker; another WAF stop reopens it with the cooldown doubled (up to 60 minutes). Each change is logged
+  once at warn as `{ handla: 'blocked' | 'probe' | 'recovered', cooldownMinutes }`. `get_session_status` reports
+  `handla: { blocked, retryInMinutes? }`.
+- **Pacing.** Handla requests start at least the minimum gap apart (one queue for the whole process, including the
+  short retries of a plain 202). At most 20 wait; more fail at once with "Too many Handla lookups queued; try fewer
+  items at once." A queued call whose MCP request was cancelled is dropped; the 15 s request timeout starts only when
+  the request leaves the queue.
+- **Cache.** Successful answers are kept in memory: a product search per (store, query ignoring case and extra spaces,
+  limit) for the cache TTL, a store search per postcode for 24 h, at most 500 entries. A cache hit makes no Handla
+  request but still spends one ICA budget token, like any tool call (one call, one token).
+
+| Variable | Default | Allowed | Effect |
+| --- | --- | --- | --- |
+| `ICA_HUB_HANDLA_COOLDOWN_MINUTES` | `10` | 1–60 | First cooldown after a WAF stop; doubled after each failed probe, up to 60. |
+| `ICA_HUB_HANDLA_MIN_GAP_MS` | `2500` | 0–60000 | Minimum time between two Handla request starts. |
+| `ICA_HUB_HANDLA_CACHE_MINUTES` | `15` | 0–1440 | Product search cache TTL; `0` turns the whole Handla cache off (store search too). |
+
+Unset or empty means the default; any other value stops the hub at start-up with a configuration error. The state is
+in memory: a restart closes the breaker and empties the cache (the WAF itself may still be refusing the IP).
+
 ### ICA app DCR secret (optional)
 
 `ICA_APP_DCR_CLIENT_SECRET` overrides the ICA app's dynamic-client-registration secret used by

@@ -76,8 +76,9 @@ and at once when you connect app access with BankID. So when you need both, reco
 session last.
 
 Messages that say "try again" need no reconnect: ICA did not answer or is limiting requests, ica-hub's per-user limit
-on ICA calls is used up (the message says for how many seconds), Handla is still preparing results, or ica-hub is
-restarting.
+on ICA calls is used up (the message says for how many seconds), Handla is still preparing results, Handla's bot
+protection is blocking price lookups for a while (the message says for about how many minutes; ICA lists, offers and
+bonus still work), or ica-hub is restarting.
 
 ## Disconnecting Claude
 

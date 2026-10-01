@@ -9,6 +9,7 @@ import { IcaRejected, IcaUnauthorized, IcaUnavailable, errorCategory } from '../
 import { fetchUserInformation, WEB_SESSION_LOGGED_OUT, WEB_SESSION_UNREADABLE, type UserInformation } from '../ica/web-session.js';
 import { createAppApi, type AppApi } from '../ica/app-api.js';
 import { createHandlaApi, type HandlaApi } from '../ica/handla-api.js';
+import { createHandlaGuard, type HandlaGuardOptions, type HandlaStatus } from '../ica/handla-guard.js';
 import { createPurchaseApi, createWebApi, type PurchaseApi, type WebApi } from '../ica/web-api.js';
 import { loadAppSession, refreshAppSession } from './app-store.js';
 import { cookieFingerprint, linkedIcaAccount, loadWebSession, markWebSession, purchaseHistoryOf, recordLoginState, saveWebJarIfChanged, type PurchaseHistoryState, type SessionRow } from './web-store.js';
@@ -20,8 +21,10 @@ import { createTokenBucket, type TokenBucket } from './rate-limit.js';
 export type KeeperLog = { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void };
 export type SessionKeeperDeps = {
   db: Db; cipher: Cipher; endpoints: IcaEndpoints; log?: KeeperLog; now?: () => Date; limiter?: TokenBucket;
-  /** Handla's 202-poll waits (default real timers, ~7 s worst case); tests inject an instant one. */
+  /** Handla's plain-202 retry waits (default real timers, 1.5 s worst case); tests inject an instant one. */
   handlaSleep?: (ms: number) => Promise<void>;
+  /** The process's Handla guard settings (config.handla): breaker cooldown, pacing gap, cache TTL. */
+  handla?: HandlaGuardOptions;
 };
 
 /** Refetch the web bearer when fewer than this many ms of its `tokenExpires` remain. */
@@ -51,9 +54,11 @@ export const appWindowEnd = (connectedAt: string | null): number => (connectedAt
 
 /** get_session_status: what a live web check plus the stored session health found. Never a token, cookie, account id or name. */
 export type SessionStatus =
-  | { linked: false }
+  | { linked: false; handla: HandlaStatus }
   | {
     linked: true;
+    /** Whether Handla calls (handla_*) are refused right now after an AWS WAF stop, and for about how many minutes. */
+    handla: HandlaStatus;
     /** `connected`: a session is linked. `working`: it was checked OK just now (the web check is live; the app one, its last use). */
     web: { connected: boolean; working: boolean; expiresAt: string | null; lastOkAt: string | null; lastError: string | null; problem?: SessionProblem['kind'] };
     purchaseHistory: PurchaseHistoryState;
@@ -73,7 +78,11 @@ export type IcaUserSession = {
   web<T>(fn: (api: WebApi) => Promise<T>): Promise<T>;
   /** www purchase history with the cookie jar; only while ICA reports loginState 2 (checked first), else NeedsFreshBankId. */
   purchases<T>(fn: (api: PurchaseApi) => Promise<T>): Promise<T>;
-  /** Handla's anonymous store and product search: no ICA account needed, but it counts against the rate limit. */
+  /**
+   * Handla's anonymous store and product search: no ICA account needed, but it counts against the rate limit. While
+   * the process's Handla circuit breaker is open the call fails at once with IcaUnavailable('blocked'), before the
+   * budget token is taken. A cache hit still spends the token (one call, one token, whatever answers it).
+   */
   handla<T>(fn: (api: HandlaApi) => Promise<T>): Promise<T>;
   /**
    * get_session_status: no account linked, or a live web check plus the stored session health (charges one budget
@@ -191,6 +200,8 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
   }
 
   const limiter = deps.limiter ?? createTokenBucket();
+  /** One per process: AWS WAF's rate rule in front of Handla is per source IP, so its breaker, queue and cache are too. */
+  const handlaGuard = createHandlaGuard({ ...deps.handla, ...(deps.log ? { log: deps.log } : {}) });
   /** Spend one of the user's ICA calls, or throw RateLimited. */
   function take(userId: string): void {
     const r = limiter.take(userId);
@@ -413,7 +424,7 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
    */
   async function statusFor(userId: string, adminUrl: string): Promise<SessionStatus> {
     const before = linkedIcaAccount(db, userId);
-    if (!before) return { linked: false };
+    if (!before) return { linked: false, handla: handlaGuard.status() };
     take(userId);
     let problem: SessionProblem | undefined;
     if (before.web) {
@@ -424,6 +435,7 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
     const windowEnd = appWindowEnd(l.app?.connectedAt ?? null);
     return {
       linked: true,
+      handla: handlaGuard.status(),
       web: {
         connected: Boolean(l.web), working: Boolean(l.web) && !problem, expiresAt: l.web?.expiresAt ?? null,
         lastOkAt: l.web?.lastOkAt ?? null, lastError: l.web?.lastError ?? null, ...(problem ? { problem: problem.kind } : {}),
@@ -460,7 +472,11 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
         return withWebCookies(accountId, (session) => fn(createPurchaseApi({ endpoints, session })), { minLoginState: 2 });
       },
       status: (adminUrl: string): Promise<SessionStatus> => statusFor(userId, adminUrl),
-      handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => { take(userId); return fn(createHandlaApi({ endpoints, sleep: deps.handlaSleep })); },
+      handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => {
+        handlaGuard.assertAvailable(); // breaker open: refuse before spending the user's budget token
+        take(userId);
+        return fn(createHandlaApi({ endpoints, guard: handlaGuard, ...(deps.handlaSleep ? { sleep: deps.handlaSleep } : {}) }));
+      },
     };
   }
 
@@ -502,6 +518,8 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
     webLoginState,
     /** @internal test */
     withWebCookies,
+    /** @internal test */
+    handlaStatus: (): HandlaStatus => handlaGuard.status(),
     /** @internal test */
     webJarUsesQueued: (): number => webJarLocks.size,
   };

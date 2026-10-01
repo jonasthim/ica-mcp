@@ -20,7 +20,7 @@ export function bearerFetcher(bearer: string): Fetcher {
  * One ICA call. 451 → IcaUnavailable('geo-blocked'), 429 → IcaUnavailable('rate-limited'), 401/403 → IcaUnauthorized,
  * other 4xx → IcaRejected, 5xx → IcaUnavailable('server-error'), no answer → IcaUnavailable('network' | 'timeout'). The body is parsed as JSON when
  * it is JSON and is never put into an error. `headers` is the raw response's headers (e.g. for a caller that reads
- * `Retry-After`, such as Handla's product search 202 poll); nothing in it is logged or put into an error.
+ * `Retry-After`, such as Handla's product search plain-202 retry); nothing in it is logged or put into an error.
  */
 export async function icaRequest(f: Fetcher, url: string, req: IcaRequest = {}): Promise<{ status: number; json: unknown; headers: Headers }> {
   const hasBody = req.body !== undefined;
@@ -32,6 +32,11 @@ export async function icaRequest(f: Fetcher, url: string, req: IcaRequest = {}):
       ...(hasBody ? { body: JSON.stringify(req.body) } : {}),
     });
   } catch (e) { throw new IcaUnavailable(errorCategory(e)); }
+  return icaResponse(r);
+}
+
+/** icaRequest's status mapping for a response already in hand (Handla checks its WAF stops first, then maps the rest). */
+export async function icaResponse(r: Response): Promise<{ status: number; json: unknown; headers: Headers }> {
   const { json } = await readBody(r);
   if (r.status === 451) throw new IcaUnavailable('geo-blocked', 451);
   if (r.status === 429) throw new IcaUnavailable('rate-limited', 429);

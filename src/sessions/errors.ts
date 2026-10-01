@@ -67,6 +67,11 @@ export function sessionErrorText(err: unknown, publicUrl: string): string | unde
       case 'unexpected-response': return 'ICA answered in a format ica-hub does not understand (ICA may have changed its app). The details were logged for the hub operator.';
       case 'shutting-down': return 'ica-hub is restarting; try again in a moment.';
       case 'not-ready': return 'Handla is still preparing results; try again in a moment.';
+      case 'blocked': {
+        const minutes = Math.max(1, Math.ceil((err.retryAfterSeconds ?? 600) / 60));
+        return `Handla's bot protection is blocking price lookups for a while (too many searches in a short time). Try again in about ${minutes} minute${minutes === 1 ? '' : 's'}. ICA lists, offers and bonus are not affected.`;
+      }
+      case 'queue-full': return 'Too many Handla lookups queued; try fewer items at once. ICA lists, offers and bonus are not affected.';
     }
   }
   if (err instanceof IcaRejected) return `ICA rejected the request (HTTP ${err.status}).`;
@@ -82,6 +87,7 @@ export function problemOf(err: unknown): SessionProblem | undefined {
   if (err instanceof NeedsWebReconnect) return { kind: 'needs-rescan', detail: 'web session ended' };
   if (err instanceof NeedsAppReconnect) return { kind: 'needs-rescan', detail: err.why === 'not-connected' ? 'app access not connected' : `app access ${err.why}` };
   if (err instanceof NeedsFreshBankId) return { kind: 'needs-step-up', loginState: err.loginState };
+  if (err instanceof IcaUnavailable && err.reason === 'blocked') return { kind: 'transient', detail: 'blocked by Handla bot protection' };
   if (err instanceof IcaUnavailable) return { kind: 'transient', detail: err.reason === 'geo-blocked' ? 'geo-blocked (451)' : err.status !== undefined ? `${err.reason} (HTTP ${err.status})` : err.reason };
   if (err instanceof IcaRejected) return { kind: 'transient', detail: `could not check (HTTP ${err.status})` };
   return undefined;

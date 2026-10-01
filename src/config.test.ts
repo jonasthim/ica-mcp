@@ -102,6 +102,14 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...base, ICA_HUB_APP_UPKEEP: 'on-demand' }).appUpkeep).toBe('on-demand');
     for (const bad of ['off', 'ondemand', 'true', '10m']) expect(() => loadConfig({ ...base, ICA_HUB_APP_UPKEEP: bad }), bad).toThrow(/ICA_HUB_APP_UPKEEP/);
   });
+  it('reads the Handla guard settings: cooldown 10 min, gap 2500 ms, cache 15 min by default; validates each', () => {
+    expect(loadConfig(base).handla).toEqual({ cooldownMinutes: 10, minGapMs: 2500, cacheMinutes: 15 });
+    expect(loadConfig({ ...base, ICA_HUB_HANDLA_COOLDOWN_MINUTES: '30', ICA_HUB_HANDLA_MIN_GAP_MS: '0', ICA_HUB_HANDLA_CACHE_MINUTES: '0' }).handla).toEqual({ cooldownMinutes: 30, minGapMs: 0, cacheMinutes: 0 });
+    expect(loadConfig({ ...base, ICA_HUB_HANDLA_COOLDOWN_MINUTES: ' ', ICA_HUB_HANDLA_MIN_GAP_MS: '' }).handla).toMatchObject({ cooldownMinutes: 10, minGapMs: 2500 });
+    for (const bad of ['0', '-1', '61', '1.5', 'ten']) expect(() => loadConfig({ ...base, ICA_HUB_HANDLA_COOLDOWN_MINUTES: bad }), bad).toThrow(/ICA_HUB_HANDLA_COOLDOWN_MINUTES/);
+    for (const bad of ['-1', '60001', '2.5', 'x']) expect(() => loadConfig({ ...base, ICA_HUB_HANDLA_MIN_GAP_MS: bad }), bad).toThrow(/ICA_HUB_HANDLA_MIN_GAP_MS/);
+    for (const bad of ['-1', '1441', 'abc']) expect(() => loadConfig({ ...base, ICA_HUB_HANDLA_CACHE_MINUTES: bad }), bad).toThrow(/ICA_HUB_HANDLA_CACHE_MINUTES/);
+  });
   it('uses the ICA app DCR registration secret unless ICA_APP_DCR_CLIENT_SECRET overrides it', () => {
     expect(loadConfig(base).icaAppDcrClientSecret).toBe(DEFAULT_ICA_APP_DCR_CLIENT_SECRET);
     expect(loadConfig({ ...base, ICA_APP_DCR_CLIENT_SECRET: 'rotated' }).icaAppDcrClientSecret).toBe('rotated');

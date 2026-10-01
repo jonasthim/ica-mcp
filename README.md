@@ -55,7 +55,8 @@ ica-hub holds two ICA sessions per person, and each message from Claude names th
 
 Order matters for purchase history: an app access BankID login ends the web session's fresh state at once, so if you
 need both, reconnect app access first and the web session last. Messages that say "try again" (ICA did not answer,
-ICA is limiting requests, ica-hub's per-user limit on ICA calls is used up, Handla is still preparing results) need no reconnect.
+ICA is limiting requests, ica-hub's per-user limit on ICA calls is used up, Handla is still preparing results or its
+bot protection is blocking price lookups for a while) need no reconnect.
 
 ## Features
 

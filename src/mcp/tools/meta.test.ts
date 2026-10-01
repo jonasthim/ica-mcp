@@ -81,6 +81,7 @@ describe('privacy: session status is built from named fields only', () => {
     'linked', 'adminUrl', 'web', 'connected', 'working', 'expiresAt', 'lastOkAt', 'lastError', 'problem',
     'purchaseHistory', 'available', 'loginState', 'checkedAt', 'purchaseHistoryNote',
     'app', 'connectedAt', 'accessExpiresAt', 'lastRefreshAt', 'windowEndsAt',
+    'handla', 'blocked', 'retryInMinutes',
   ];
 
   it('returns only the allowed keys; no ICA account id, token, cookie or personnummer ever passes through', async () => {

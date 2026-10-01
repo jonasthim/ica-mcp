@@ -241,7 +241,34 @@ For zip 11122 (central Stockholm): `forHomeDelivery` had 63 stores, `forPickupDe
 ```
 `taxCodesDisplayNames` matched the redaction regex (`code`) and came back `<redacted>` in the saved fixture — harmless, just means that field's real value isn't captured in `spike/out`.
 
-Handla product search may answer 202 while preparing; the client polls up to ~7 s.
+~~Handla product search may answer 202 while preparing; the client polls up to ~7 s.~~ Corrected 2026-10-01: the
+long-lasting 202s seen live were AWS WAF challenges, not "preparing" (see **Handla: AWS WAF** below). A plain 202
+without a WAF header has not been seen live since; the client retries one only briefly (0.5 s, then 1 s).
+
+### Handla: AWS WAF (measured live 2026-10-01)
+
+Measured from the production egress IP. Shapes and headers only.
+
+- `handlaprivatkund.ica.se` product search sits behind **CloudFront + AWS WAF**. A rate rule trips after about **7
+  searches within about 15 s**. From then on, for many minutes (the window is still being measured), every request
+  from that IP is refused. The rule is per IP and also covers the anonymous store search (`handla.ica.se/api/store/v1`),
+  so the hub treats the whole Handla client as one unit.
+- **Browser-looking request** (Chrome UA, `Referer`, `Origin`, `Accept-Language` — what the hub sends): **HTTP 202**,
+  `x-amzn-waf-action: challenge`, `server: CloudFront`, `x-cache: Error from cloudfront`, empty body, no `set-cookie`.
+  This is a WAF **CHALLENGE**: there is no JS to run and no token to get, so polling never clears it (and likely keeps
+  the rule tripped).
+- **Plain request**: **HTTP 403**, `server: CloudFront`, an HTML body saying "Request blocked", no `x-amzn-waf-*`
+  header. This is a WAF **BLOCK**.
+
+What the hub does (src/ica/handla-api.ts, src/ica/handla-guard.ts):
+
+- A response with any `x-amzn-waf-action` header, or a 403 with `server` containing `CloudFront`, `x-cache` starting
+  with `Error from cloudfront`, or a small body containing "Request blocked", is a WAF stop:
+  `IcaUnavailable('blocked')` at once, never polled.
+- A process-wide circuit breaker then refuses every Handla call for a cooldown (10 min, doubled after each probe that
+  is stopped again, up to 60 min) without contacting Handla; after it, exactly one probe request goes through.
+- All Handla requests from the process go through one queue, at least 2.5 s apart (start to start), at most 20 waiting.
+- Successful answers are cached in memory (search 15 min, store search 24 h, 500 entries).
 
 **Store home page** — `GET https://handlaprivatkund.ica.se/stores/<accountId>/` → **HTTP 200**. The anonymous page **does** already embed a CSRF token (`"csrf":{"token":"..."}` present in the HTML — `csrf token present (anonymous): true`), and the page also matched the WAF/challenge heuristic (`waf challenge: true`) — the regex `/awswaf|challenge/i` matched somewhere in the HTML (likely boilerplate WAF/bot-protection script tags rather than an active interactive challenge, since the request still returned a normal 200 page body with product data reachable). Worth re-checking with the real network trace in Task 0.9 to see whether this is just static WAF JS or an actual blocking challenge under different conditions (e.g. higher request rate).
 
