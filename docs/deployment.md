@@ -55,7 +55,25 @@ The installer:
    systemd unit, and a `/healthz` check. It ends by printing the installed version.
 
 It never asks anything (stdin is not read, so piping into `bash` is safe), and it never
-overwrites an existing `/etc/ica-hub/env`. Set `ICA_HUB_REPO` to install from a fork
+overwrites an existing `/etc/ica-hub/env`.
+
+Two things to know before running it as root:
+
+- **Node.js comes from NodeSource when it is missing.** If `node` is absent or older than
+  24, the installer runs NodeSource's `setup_24.x` script (`curl … | bash -`) as root.
+  Unlike the release tarball, that script is not checksum-verified by the installer. To
+  avoid it, install Node.js 24 yourself first (for example from your distribution or a
+  NodeSource apt repository you set up and verified); the installer then skips this step.
+- **`/opt/ica-hub` is replaced on every install and upgrade.** Everything there except
+  `node_modules` is deleted. Keep nothing of your own in it: settings belong in
+  `/etc/ica-hub/env` and data in `/var/lib/ica-hub`.
+
+**Switching an existing source install to releases.** A tree that was rsynced to
+`/opt/ica-hub` has no `VERSION` file, so a plain re-run rebuilds that tree. Run the
+installer once with `ICA_HUB_VERSION=<version>`; after that, `VERSION` exists and plain
+re-runs install the latest release.
+
+Set `ICA_HUB_REPO` to install from a fork
 (`owner/repo`) or a mirror (a base URL with the same `releases/download/v<version>/`
 layout).
 
