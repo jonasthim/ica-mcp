@@ -83,17 +83,69 @@ ICA is limiting requests, ica-hub's per-user limit on ICA calls is used up, Hand
 - An **ICA account with BankID** for each household member who connects ICA.
 - **Your own domain with HTTPS**, reachable from the internet (Claude connects to it), behind a reverse proxy
   without an SSO gate on this vhost.
-- Node.js 24 (the installer sets it up), or Docker.
+- Docker, or a Debian 13 host or LXC (the installer sets up Node.js 24).
 
 ## Quick start
 
-1. Deploy: follow [docs/deployment.md](docs/deployment.md). The primary path is the systemd installer
-   (`deploy/install.sh` on a Debian host or LXC); a Docker Compose setup is the alternative.
-2. Open `https://<your host>/admin`, enter the setup code from the service log, and create the first admin (or set
-   up single sign-on first). Then open **ICA account** and connect with BankID.
-3. Connect Claude: follow [docs/connecting-claude.md](docs/connecting-claude.md).
+Every release ships two ways to install. Both need the requirements above; the full guide, with upgrades, backups
+and the reverse proxy, is [docs/deployment.md](docs/deployment.md).
 
-What is known about ICA's endpoints is in [docs/api-notes.md](docs/api-notes.md).
+### A. Docker
+
+The image `ghcr.io/jonasthim/ica-mcp` is built for linux/amd64 and linux/arm64 (Raspberry Pi 4/5 with a 64-bit OS).
+A minimal `compose.yaml` (the repository's [compose.yaml](compose.yaml) lists every optional setting):
+
+```yaml
+services:
+  ica-hub:
+    image: ghcr.io/jonasthim/ica-mcp:latest
+    restart: unless-stopped
+    stop_grace_period: 30s # shutdown can take up to 20 s; Docker's default 10 s could force a BankID reconnect
+    ports: ["3000:3000"]
+    environment:
+      ICA_HUB_URL: https://ica.example.com # the public https origin
+      ICA_HUB_MASTER_KEY: ${ICA_HUB_MASTER_KEY} # openssl rand -base64 32, back it up
+      ICA_HUB_AUTH_SECRET: ${ICA_HUB_AUTH_SECRET} # openssl rand -base64 32
+      TRUST_PROXY: "1" # number of reverse proxies in front
+    volumes: ["ica-hub-data:/data"]
+volumes:
+  ica-hub-data:
+```
+
+Put the two secrets in a `.env` file next to it, then `docker compose up -d`. To pin a version instead of following
+`latest`, use a release tag: `:0.2.0` (exactly that release) or `:0.2` (the newest 0.2.x). Releases and their notes
+are on the [releases page](https://github.com/jonasthim/ica-mcp/releases).
+
+### B. Debian 13 host or LXC (systemd, no Docker)
+
+As root on a fresh Debian 13 machine or container:
+
+```bash
+curl -fsSL https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh | ICA_HUB_URL=https://ica.example.com bash
+```
+
+It downloads the latest release, verifies its checksum, builds it with Node.js 24 in `/opt/ica-hub`, generates the
+secrets into `/etc/ica-hub/env` and starts the `ica-hub` systemd service. Run the same command again to upgrade.
+
+To check the installer before running it:
+
+```bash
+curl -fsSLO https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh
+curl -fsSLO https://github.com/jonasthim/ica-mcp/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # expect: install.sh: OK
+less install.sh
+ICA_HUB_URL=https://ica.example.com bash install.sh
+```
+
+### Then
+
+1. Open `https://<your host>/admin`, enter the setup code from the service log (`docker compose logs ica-hub` or
+   `journalctl -u ica-hub`), and create the first admin (or set up single sign-on first). Then open **ICA account**
+   and connect with BankID.
+2. Connect Claude: follow [docs/connecting-claude.md](docs/connecting-claude.md).
+
+What is known about ICA's endpoints is in [docs/api-notes.md](docs/api-notes.md). Changes per release are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Screenshots
 

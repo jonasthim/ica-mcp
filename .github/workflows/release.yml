@@ -1,15 +1,74 @@
 name: release
 on: { push: { tags: ['v*'] } }
-permissions: { contents: read, packages: write }
+permissions: { contents: read }
 jobs:
-  image:
+  # Same gate as CI (lint, typecheck, test, build, docker build): nothing is published unless it passes.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  version:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Tag matches package.json version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "v$pkg" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+
+  image:
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - uses: docker/metadata-action@v6
         id: meta
-        with: { images: "ghcr.io/${{ github.repository }}", tags: "type=semver,pattern={{version}}\ntype=raw,value=latest" }
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Self-hosted hub that connects a household's ICA accounts to Claude (MCP server and admin UI)
+            org.opencontainers.image.licenses=MIT
+          annotations: |
+            org.opencontainers.image.description=Self-hosted hub that connects a household's ICA accounts to Claude (MCP server and admin UI)
       - uses: docker/build-push-action@v7
-        with: { context: ., push: true, tags: "${{ steps.meta.outputs.tags }}" }
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build release assets
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          git archive --prefix="ica-mcp-${version}/" -o "out/ica-mcp-${version}.tar.gz" "$GITHUB_REF_NAME"
+          cp deploy/install.sh out/install.sh
+          (cd out && sha256sum "ica-mcp-${version}.tar.gz" install.sh > SHA256SUMS && cat SHA256SUMS)
+      - name: Create GitHub release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "ica-mcp $version" \
+            "out/ica-mcp-${version}.tar.gz" out/install.sh out/SHA256SUMS

@@ -1,6 +1,9 @@
 services:
   ica-hub:
-    image: ghcr.io/jonasthim/ica-hub:latest
+    # Published multi-arch image (amd64, arm64). Pin a release instead of latest, e.g. :0.2.0 or :0.2.
+    image: ghcr.io/jonasthim/ica-mcp:latest
+    # To build from this checkout instead of pulling: uncomment, then `docker compose up -d --build`.
+    # build: .
     restart: unless-stopped
     # The graceful shutdown takes up to 20 s (in-flight requests, then any ICA token refresh still running, whose
     # rotated refresh token must be stored). Docker's default of 10 s would SIGKILL it and could force a BankID reconnect.

@@ -2,16 +2,92 @@
 
 ica-hub is a single Node.js process plus a persistent data directory (SQLite database +
 WAL files). It terminates OAuth, MCP and the admin UI itself; TLS and public routing are
-the reverse proxy's job. Two deployment methods are supported: bare systemd on a
-dedicated Debian LXC (the self-hosted default — one app per container, no Docker), and a
-Docker container for everyone else. Everything under Prerequisites, Reverse proxy
-requirements, Secrets and Monitoring below applies to both.
+the reverse proxy's job. Every release (a `v*` tag on github.com/jonasthim/ica-mcp)
+publishes two installable artefacts:
 
-## Bare systemd (Debian LXC)
+- a multi-arch Docker image, `ghcr.io/jonasthim/ica-mcp` (linux/amd64 and linux/arm64),
+  tagged `<version>` (e.g. `0.2.0`), `<major>.<minor>` (e.g. `0.2`) and `latest`;
+- a GitHub release with `install.sh`, the source tarball `ica-mcp-<version>.tar.gz` it
+  installs, and `SHA256SUMS` covering both.
 
-This is the recommended setup for a self-hosted server running one app per Proxmox LXC: a Debian 13
-container created from the Proxmox community `debian` script, with `deploy/install.sh`
-building and running ica-hub as a plain systemd service — no Docker involved.
+So there are three ways to deploy: the Docker image, the release installer on a Debian 13
+host or LXC (bare systemd, no Docker), or the same installer run against a source tree you
+copy over yourself ("from source"). Everything under Prerequisites, Reverse proxy
+requirements, Secrets and Monitoring below applies to all of them.
+
+The code, the systemd unit and the paths keep the name `ica-hub` (`/opt/ica-hub`,
+`/etc/ica-hub`, `/var/lib/ica-hub`, `ica-hub.service`); only the repository, the release
+files and the image are named `ica-mcp`.
+
+## Docker image (quick path)
+
+See [Docker (container)](#docker-container) below for the full steps. In short: copy
+`compose.yaml`, put `ICA_HUB_URL`, `ICA_HUB_MASTER_KEY` and `ICA_HUB_AUTH_SECRET` in a
+`.env` next to it, and `docker compose up -d`. The data lives in the `/data` volume.
+
+**Pinning a version.** `latest` follows every release. To stay on one, set the image to
+`ghcr.io/jonasthim/ica-mcp:0.2.0` (exactly that release) or `:0.2` (the newest 0.2.x
+patch release). Upgrade by changing the tag, after reading the release notes.
+
+## Release installer (Debian 13 host or LXC)
+
+As root on a fresh Debian 13 host or container (for example one created with the Proxmox
+community `debian` script):
+
+```bash
+curl -fsSL https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh | ICA_HUB_URL=https://ica.example.com bash
+```
+
+The installer:
+
+1. resolves the version: `ICA_HUB_VERSION` if set (e.g. `ICA_HUB_VERSION=0.2.0`),
+   otherwise the latest release, read from where GitHub's `releases/latest` link redirects
+   to (no GitHub API call, so no API rate limit);
+2. downloads `ica-mcp-<version>.tar.gz` and `SHA256SUMS` from
+   `https://github.com/jonasthim/ica-mcp/releases/download/v<version>/`, checks the
+   tarball's SHA-256 and aborts on a mismatch before touching anything;
+3. replaces the source in `/opt/ica-hub` with the release (everything there except
+   `node_modules` is removed first: nothing stateful lives there, the database is in
+   `/var/lib/ica-hub` and the configuration in `/etc/ica-hub/env`), and writes the version
+   to `/opt/ica-hub/VERSION`;
+4. continues with the same steps as the source install below: apt dependencies, Node.js
+   24, the `ica-hub` user, the build, `/etc/ica-hub/env` on the first run only, the
+   systemd unit, and a `/healthz` check. It ends by printing the installed version.
+
+It never asks anything (stdin is not read, so piping into `bash` is safe), and it never
+overwrites an existing `/etc/ica-hub/env`. Set `ICA_HUB_REPO` to install from a fork
+(`owner/repo`) or a mirror (a base URL with the same `releases/download/v<version>/`
+layout).
+
+**Verify first.** To read the installer and check it against the release's checksums
+before running it as root:
+
+```bash
+curl -fsSLO https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh
+curl -fsSLO https://github.com/jonasthim/ica-mcp/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # expect: install.sh: OK
+less install.sh
+ICA_HUB_URL=https://ica.example.com bash install.sh
+```
+
+**Upgrade.** Back up the database first (see Backups), then re-run the installer with no
+arguments: it installs the latest release, rebuilds and restarts the service. Pin or
+roll forward to a specific release with `ICA_HUB_VERSION=<version>`. `cat
+/opt/ica-hub/VERSION` shows what is installed.
+
+```bash
+curl -fsSL https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh | bash
+```
+
+Logs, backups and the env file work as described for the source install below.
+
+## From source (bare systemd, Debian LXC)
+
+The same installer, run against a source tree you copy to `/opt/ica-hub` yourself, for
+example an unreleased commit or a local change. It builds and runs ica-hub as a plain
+systemd service, no Docker involved. The installer uses the tree as it is when
+`/opt/ica-hub/package.json` exists, there is no `/opt/ica-hub/VERSION` (a release install
+writes one; the `rsync --delete` below removes it) and `ICA_HUB_VERSION` is not set.
 
 1. Create the LXC (Proxmox community `debian` script or equivalent), then rsync the
    source tree into it at `/opt/ica-hub`, excluding build output and local state:
@@ -38,8 +114,10 @@ building and running ica-hub as a plain systemd service — no Docker involved.
    `/etc/ica-hub/env` that makes the service fail fast with a clear config error on
    startup — edit that file and set the real public origin, then `systemctl restart
    ica-hub`.
-4. **Upgrade**: re-run the rsync in step 1 (it deletes files removed upstream), then
-   re-run `deploy/install.sh` — it rebuilds in place and restarts the service. Database
+4. **Upgrade**: re-run the rsync in step 1 (it deletes files removed upstream, including
+   a `VERSION` file from an earlier release install), then re-run `deploy/install.sh` —
+   it rebuilds in place and restarts the service. To switch back to releases, run the
+   release installer with `ICA_HUB_VERSION` set once. Database
    migrations run automatically on startup, same as the container. **Back up the
    database first** (see Backups below) — this release's migrations
    (`0003_roles-to-user`, `0004_phase1-5-users-audit-invites`) run automatically and
@@ -485,7 +563,7 @@ Commands assume the systemd layout (`/var/lib/ica-hub`); adapt the paths for Doc
    `OIDC_ISSUER_URL` — `curl -s "${OIDC_ISSUER_URL%/}/.well-known/openid-configuration" | jq -r .authorization_endpoint`.
    The sign-in page's CSP allows form posts only to the issuer's origin, so an IdP that sends the browser to another
    origin (e.g. an internal hostname) would have its redirect blocked.
-4. **Deploy** (rsync + `deploy/install.sh`, see Bare systemd above). Migrations run on start.
+4. **Deploy** (re-run the release installer, or rsync + `deploy/install.sh`; see above). Migrations run on start.
 5. **After the deploy**: in a Claude chat, ask Claude to use the ICA `ping` tool — it must answer now. Check it
    again after Claude's next token refresh (access tokens are short-lived, so trying again the next day is enough):
    a refreshed token must keep working too. If `ping` fails with a 401 loop, reconnect Claude; if it still fails,
@@ -503,7 +581,7 @@ changes). Migration `0005` is purely additive — a new `app_setting` table and 
    sqlite3 /var/lib/ica-hub/ica-hub.db ".backup '/var/backups/ica-hub-pre-1.6.db'"
    ```
 
-2. **Deploy** (rsync + `deploy/install.sh`, or `docker compose pull && docker compose up -d`). Migrations run on
+2. **Deploy** (the release installer, rsync + `deploy/install.sh`, or `docker compose pull && docker compose up -d`). Migrations run on
    start.
 3. **After the deploy**: on an existing install (any user already exists), `/admin/setup` must answer 404 — confirm
    with `curl -o /dev/null -w '%{http_code}\n' https://<your host>/admin/setup`.
@@ -604,7 +682,10 @@ never directly over HTTP, so a future Better Auth upgrade that adds new endpoint
 
 ## Docker (container)
 
-The systemd setup above is the primary, tested path; Docker is the alternative.
+The image is `ghcr.io/jonasthim/ica-mcp`, for linux/amd64 and linux/arm64 (a Raspberry Pi
+4 or 5 with a 64-bit OS runs it). `compose.yaml` uses `:latest`; pin a release as
+described under Docker image (quick path). To build the image from a checkout instead,
+uncomment `build: .` in `compose.yaml` and run `docker compose up -d --build`.
 
 1. Copy `compose.yaml`, set the required environment variables (`ICA_HUB_URL`,
    `ICA_HUB_MASTER_KEY`, `ICA_HUB_AUTH_SECRET`, plus any optional ones you need) in a
@@ -619,7 +700,7 @@ The systemd setup above is the primary, tested path; Docker is the alternative.
    `drizzle-orm`'s migrator before the server listens) — there is no separate migrate
    step for a deploy.
 4. Check `curl https://<ICA_HUB_URL>/healthz` —
-   `{"ok":true,"version":"0.0.0","db":"ok","jwks":"ok"}` (with your release's version) means
+   `{"ok":true,"version":"0.2.0","db":"ok","jwks":"ok"}` (with your release's version) means
    the app is up, the database is reachable and it can resolve its own JWKS. `jwks:
    "unreachable"` with `ok: true` is a warning, not an outage: some reverse-proxy/tunnel
    setups block a service from calling back into its own public hostname (hairpin NAT).
@@ -731,9 +812,14 @@ master key cannot decrypt any stored ICA session, and a master key without a mat
 
 ## Upgrade (Docker)
 
+Back up first (see Backups). With `:latest`:
+
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+With a pinned tag, change the tag in `compose.yaml` (e.g. `:0.2.0` to `:0.3.0`), then run
+the same command. The release notes and CHANGELOG.md list what changed.
 
 Migrations run automatically on the new container's start, before it starts accepting
 requests. Roll back by pulling the previous image tag; if a migration in the new version
@@ -747,3 +833,28 @@ longer exists and cannot start against a migrated database. **Take a backup firs
 Backups below) — a rollback for this release means restoring that backup together with
 the previous image tag, not just pulling an older tag against the already-migrated
 database.
+
+## Upgrade (release installer)
+
+Re-run the installer as root; with no `ICA_HUB_VERSION` it installs the latest release:
+
+```bash
+curl -fsSL https://github.com/jonasthim/ica-mcp/releases/latest/download/install.sh | bash
+```
+
+`/etc/ica-hub/env` is kept as it is; migrations run on the restarted service's start, as in
+the container. Back up the database first, and read the release notes for migrations that
+cannot be rolled back.
+
+## Publishing a release (maintainer)
+
+1. Set `version` in `package.json` and add a CHANGELOG.md entry, commit.
+2. Tag and push: `git tag v<version> && git push origin v<version>`. The tag must equal
+   `v` + the `package.json` version, or the release workflow stops.
+3. `.github/workflows/release.yml` runs the CI gate (lint, typecheck, test, build, docker
+   build), then pushes the multi-arch image to GHCR and creates the GitHub release with
+   `ica-mcp-<version>.tar.gz`, `install.sh` and `SHA256SUMS` and generated notes.
+4. **First release only:** GHCR creates the `ica-mcp` package as private. Once, as the
+   repository owner, open the package on GitHub (profile, Packages, `ica-mcp`, Package
+   settings) and change its visibility to **Public**, or `docker pull` fails for everyone
+   else. Later releases keep that setting.
