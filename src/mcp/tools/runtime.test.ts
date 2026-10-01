@@ -3,7 +3,7 @@ import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { IcaUnavailable } from '../../ica/errors.js';
-import { NotLinked, RateLimited } from '../../sessions/errors.js';
+import { IcaRejected, NotLinked, RateLimited } from '../../sessions/errors.js';
 import type { IcaUserSession } from '../../sessions/keeper.js';
 import { MAYBE_APPLIED, ToolInputError, WriteOutcomeUnknown, fail, ok, runTool, type ToolDeps } from './runtime.js';
 
@@ -96,6 +96,22 @@ describe('runTool', () => {
     lines.length = 0;
     await runTool(deps, ctx, 't', async () => { throw new IcaUnavailable('network'); });
     expect(lines.map((l) => l.level)).toEqual(['info']);
+  });
+  it('logs the IcaUnavailable reason and HTTP status (when known), so the operator can tell a 202-not-ready from a 429 or a 5xx', async () => {
+    lines.length = 0;
+    await runTool(deps, ctx, 't', async () => { throw new IcaUnavailable('not-ready'); });
+    await runTool(deps, ctx, 't', async () => { throw new IcaUnavailable('rate-limited', 429); });
+    await runTool(deps, ctx, 't', async () => { throw new IcaUnavailable('server-error', 503); });
+    expect(lines.map((l) => l.obj)).toEqual([
+      { tool: 't', userId: 'u1', status: 'IcaUnavailable', ms: expect.any(Number), reason: 'not-ready' },
+      { tool: 't', userId: 'u1', status: 'IcaUnavailable', ms: expect.any(Number), reason: 'rate-limited', httpStatus: 429 },
+      { tool: 't', userId: 'u1', status: 'IcaUnavailable', ms: expect.any(Number), reason: 'server-error', httpStatus: 503 },
+    ]);
+  });
+  it('logs an IcaRejected\'s HTTP status, with no reason (it has none) and nothing from the ICA body', async () => {
+    lines.length = 0;
+    await runTool(deps, ctx, 't', async () => { throw new IcaRejected(404); });
+    expect(lines).toEqual([{ level: 'info', obj: { tool: 't', userId: 'u1', status: 'IcaRejected', ms: expect.any(Number), httpStatus: 404 } }]);
   });
   it('an error result carries neither the stack nor the thrown value', async () => {
     const secret = 'Bearer APP-ACCESS-TOKEN-SECRET-7a8b';

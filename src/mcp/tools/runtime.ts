@@ -3,7 +3,7 @@ import type { Config } from '../../config.js';
 import type { Db } from '../../db/index.js';
 import type { Logger } from '../../logger.js';
 import type { IcaUserSession, SessionKeeper } from '../../sessions/keeper.js';
-import { IcaUnavailable, sessionErrorText } from '../../sessions/errors.js';
+import { IcaRejected, IcaUnavailable, sessionErrorText } from '../../sessions/errors.js';
 import { userIdOf, type ToolCtx } from '../context.js';
 
 /** Tools reach ICA only through `keeper.forUser` (called by runTool alone), so that is all they are given. */
@@ -33,7 +33,9 @@ const INTERNAL = 'ica-hub hit an internal error; it has been logged for the hub 
 /**
  * Every tool call goes through here: resolve the verified hub user, hand `fn` that user's ICA session, turn known
  * errors into actionable messages and anything else into a generic one, and log exactly one line
- * { tool, userId, status, ms } (status: 'ok', 'error' for a result with `isError`, else the thrown error's name).
+ * { tool, userId, status, ms, reason?, httpStatus? } (status: 'ok', 'error' for a result with `isError`, else the
+ * thrown error's name). `reason` and `httpStatus` are our own codes and numbers — an `IcaUnavailable`'s reason (and
+ * HTTP status, when known) or an `IcaRejected`'s HTTP status — never ICA content, and left out otherwise.
  * Tools report bad input by throwing `ToolInputError`, not by returning `fail(...)`. No ICA body, token or error message of unknown origin ever reaches the result or the
  * log.
  *
@@ -48,6 +50,8 @@ export async function runTool(
   const started = performance.now();
   let userId = 'unknown';
   let status = 'ok';
+  let reason: string | undefined;
+  let httpStatus: number | undefined;
   try {
     userId = userIdOf(ctx as ToolCtx);
     const result = await fn(deps.keeper.forUser(userId), userId);
@@ -58,6 +62,7 @@ export async function runTool(
     if (e instanceof ToolInputError) return fail(e.message);
     const maybe = e instanceof WriteOutcomeUnknown;
     const err = maybe ? e.inner : e;
+    if (err instanceof IcaUnavailable) { reason = err.reason; httpStatus = err.status; } else if (err instanceof IcaRejected) { httpStatus = err.status; }
     const withAdvice = (text: string): string => (maybe ? `${text} ${MAYBE_APPLIED}` : text);
     const text = sessionErrorText(err, deps.config.publicUrl);
     if (text !== undefined) {
@@ -67,6 +72,6 @@ export async function runTool(
     deps.log.error({ tool, userId, err: { name: status } }, 'tool failed');
     return fail(withAdvice(INTERNAL));
   } finally {
-    deps.log.info({ tool, userId, status, ms: Math.round(performance.now() - started) }, 'tool call');
+    deps.log.info({ tool, userId, status, ms: Math.round(performance.now() - started), ...(reason !== undefined ? { reason } : {}), ...(httpStatus !== undefined ? { httpStatus } : {}) }, 'tool call');
   }
 }

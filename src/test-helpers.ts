@@ -44,6 +44,8 @@ export async function startTestApp(
   extraEnv: Record<string, string> = {},
   opts: { icaEndpoints?: IcaEndpoints; firstRun?: boolean; seed?: (db: Db, cipher: Cipher) => void; log?: Logger; settingsFetchLimit?: number;
     icaRateLimit?: { capacity: number; refillPerSecond: number };
+    /** Handla's 202-poll waits; defaults to real timers (src/server.ts's default) when omitted. */
+    handlaSleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<TestCtx> {
   const db = openDb(':memory:');
@@ -64,6 +66,7 @@ export async function startTestApp(
   const holder = await createAuthHolder({ config, db, cipher, audit, oidcRejections, log, setup });
   const app = createApp({ config, db, auth: holder, cipher, audit, icaEndpoints: opts.icaEndpoints, oidcRejections, setup, log, settingsFetchLimit: opts.settingsFetchLimit,
     ...(opts.icaRateLimit ? { icaRateLimit: opts.icaRateLimit } : {}),
+    ...(opts.handlaSleep ? { handlaSleep: opts.handlaSleep } : {}),
   });
   server.on('request', app);
   return {
@@ -288,12 +291,13 @@ export type ToolTest = { t: TestCtx; fake: FakeIca; logs: string[]; alice: ToolT
  * A fake ICA (lists, plus `FAKE_ALL_ROUTES` (merged under `o.fake.routes`) — `FAKE_APP_ROUTES` for stores, offers, bonus and products, `FAKE_WEB_ROUTES` for article search — and whatever `o.fake` adds; the web bearer is refused on mobile/* like the real gateway), the
  * full app, and three hub users with real OAuth tokens from the whole Claude connection: alice and bob each linked to
  * their own ICA account (web + app; bob's app token lives an hour, so it never needs a refresh the fake could not
- * serve), carol not linked. All log lines are collected in `logs`.
+ * serve), carol not linked. All log lines are collected in `logs`. Handla's 202-poll waits are instant (real timers
+ * would otherwise cost a test up to ~7 s to reach `IcaUnavailable('not-ready')`).
  */
 export async function startToolTest(o: { fake?: Partial<FakeIcaOptions>; icaRateLimit?: { capacity: number; refillPerSecond: number }; env?: Record<string, string> } = {}): Promise<ToolTest> {
   const fake = await startFakeIca({ pendingPolls: 0, mobileAcceptsWebBearer: false, appLists: fakeHouseholdLists(), extraAppBearers: [FAKE_SECRETS.appAccessTokenB], ...o.fake, routes: { ...FAKE_ALL_ROUTES, ...o.fake?.routes } });
   const logs: string[] = [];
-  const t = await startTestApp(o.env ?? {}, { icaEndpoints: fake.endpoints, log: captureLogs(logs), ...(o.icaRateLimit ? { icaRateLimit: o.icaRateLimit } : {}) });
+  const t = await startTestApp(o.env ?? {}, { icaEndpoints: fake.endpoints, log: captureLogs(logs), ...(o.icaRateLimit ? { icaRateLimit: o.icaRateLimit } : {}), handlaSleep: () => Promise.resolve() });
   const make = async (email: string, name: string, app: AppState | null): Promise<ToolTestUser> => {
     const u = await createHubUser(t, { email, name });
     if (app) await linkFakeIca(t, fake, u, { app });

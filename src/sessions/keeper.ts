@@ -18,7 +18,11 @@ import { createTokenBucket, type TokenBucket } from './rate-limit.js';
 
 /** The two log calls the keeper makes (pino's Logger satisfies it). Never given a token, cookie or ICA body. */
 export type KeeperLog = { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void };
-export type SessionKeeperDeps = { db: Db; cipher: Cipher; endpoints: IcaEndpoints; log?: KeeperLog; now?: () => Date; limiter?: TokenBucket };
+export type SessionKeeperDeps = {
+  db: Db; cipher: Cipher; endpoints: IcaEndpoints; log?: KeeperLog; now?: () => Date; limiter?: TokenBucket;
+  /** Handla's 202-poll waits (default real timers, ~7 s worst case); tests inject an instant one. */
+  handlaSleep?: (ms: number) => Promise<void>;
+};
 
 /** Refetch the web bearer when fewer than this many ms of its `tokenExpires` remain. */
 const WEB_BEARER_MARGIN_MS = 60_000;
@@ -456,7 +460,7 @@ export function createSessionKeeper(deps: SessionKeeperDeps) {
         return withWebCookies(accountId, (session) => fn(createPurchaseApi({ endpoints, session })), { minLoginState: 2 });
       },
       status: (adminUrl: string): Promise<SessionStatus> => statusFor(userId, adminUrl),
-      handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => { take(userId); return fn(createHandlaApi({ endpoints })); },
+      handla: async <T>(fn: (api: HandlaApi) => Promise<T>): Promise<T> => { take(userId); return fn(createHandlaApi({ endpoints, sleep: deps.handlaSleep })); },
     };
   }
 

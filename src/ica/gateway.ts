@@ -19,9 +19,10 @@ export function bearerFetcher(bearer: string): Fetcher {
 /**
  * One ICA call. 451 → IcaUnavailable('geo-blocked'), 429 → IcaUnavailable('rate-limited'), 401/403 → IcaUnauthorized,
  * other 4xx → IcaRejected, 5xx → IcaUnavailable('server-error'), no answer → IcaUnavailable('network' | 'timeout'). The body is parsed as JSON when
- * it is JSON and is never put into an error.
+ * it is JSON and is never put into an error. `headers` is the raw response's headers (e.g. for a caller that reads
+ * `Retry-After`, such as Handla's product search 202 poll); nothing in it is logged or put into an error.
  */
-export async function icaRequest(f: Fetcher, url: string, req: IcaRequest = {}): Promise<{ status: number; json: unknown }> {
+export async function icaRequest(f: Fetcher, url: string, req: IcaRequest = {}): Promise<{ status: number; json: unknown; headers: Headers }> {
   const hasBody = req.body !== undefined;
   let r: Response;
   try {
@@ -37,7 +38,7 @@ export async function icaRequest(f: Fetcher, url: string, req: IcaRequest = {}):
   if (r.status === 401 || r.status === 403) throw new IcaUnauthorized(r.status);
   if (r.status >= 500) throw new IcaUnavailable('server-error', r.status);
   if (r.status >= 400) throw new IcaRejected(r.status);
-  return { status: r.status, json };
+  return { status: r.status, json, headers: r.headers };
 }
 
 /** Parse an ICA answer; a mismatch becomes IcaUnavailable('unexpected-response') carrying issue paths and codes only. */

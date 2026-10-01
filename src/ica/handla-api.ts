@@ -38,18 +38,49 @@ const anonymous: Fetcher = (url, init = {}) => withTimeout(init, (i) => fetch(ur
   headers: { 'User-Agent': CHROME_UA, 'Accept-Language': 'sv-SE,sv;q=0.9,en;q=0.8', ...(i.headers as Record<string, string> | undefined) },
 }));
 
-export function createHandlaApi(o: { endpoints: IcaEndpoints; fetcher?: Fetcher }) {
+/** The default poll schedule after a 202 (0.5, 1, 1.5, 2 and 2 s — about 7 s total), under the 15 s request timeout. */
+const DEFAULT_POLL_DELAYS_MS = [500, 1000, 1500, 2000, 2000];
+/** `Retry-After` is honoured but never waited on for longer than this, however long Handla asks for. */
+const RETRY_AFTER_CAP_MS = 3000;
+const defaultSleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+
+/** `Retry-After` (seconds, the only form Handla has been seen to send) converted to ms and capped, or undefined if absent/unparseable. */
+function retryAfterMs(headers: Headers): number | undefined {
+  const v = headers.get('retry-after');
+  if (v === null) return undefined;
+  const seconds = Number(v);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, RETRY_AFTER_CAP_MS) : undefined;
+}
+
+export function createHandlaApi(o: {
+  endpoints: IcaEndpoints; fetcher?: Fetcher;
+  /** Test-only: replaces the real 0.5–2 s waits with something instant or inspectable. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Test-only: replaces the default poll schedule. */
+  pollDelaysMs?: number[];
+}) {
   const f = o.fetcher ?? anonymous;
+  const sleep = o.sleep ?? defaultSleep;
+  const pollDelaysMs = o.pollDelaysMs ?? DEFAULT_POLL_DELAYS_MS;
   return {
     stores: (zip: string): Promise<HandlaStoreSearch> =>
       icaJson(f, `${o.endpoints.handlaStores}/api/store/v1?${new URLSearchParams({ zip, customerType: 'B2C' })}`, HandlaStoreSearchSchema),
-    /** A store's product search. Handla sometimes answers 202 while it prepares the page: retried once after 0.5 s. */
+    /**
+     * A store's product search. Handla sometimes answers 202 while it prepares the page — likely longer for a store
+     * or query it hasn't prepared recently — so a 202 is polled with increasing delays (`pollDelaysMs`, about 7 s in
+     * total) rather than retried once. A `Retry-After` header is honoured, capped at `RETRY_AFTER_CAP_MS`. One call
+     * here still spends exactly one of the caller's ICA budget tokens; the polling is internal. If it is still 202
+     * after the last poll, `IcaUnavailable('not-ready')` is thrown, same as before.
+     */
     async search(storeId: string, query: string, max = 10): Promise<HandlaProduct[]> {
       const base = `${o.endpoints.handla}/stores/${encodeURIComponent(storeId)}`;
       const url = `${base}/api/webproductpagews/v6/product-pages/search?${new URLSearchParams({ q: query, tag: 'web', maxPageSize: String(max), includeAdditionalPageInfo: 'false', maxProductsToDecorate: String(max) })}`;
       const headers = { Referer: `${base}/`, Origin: new URL(o.endpoints.handla).origin };
       let r = await icaRequest(f, url, { headers });
-      if (r.status === 202) { await new Promise((res) => setTimeout(res, 500)); r = await icaRequest(f, url, { headers }); }
+      for (let i = 0; r.status === 202 && i < pollDelaysMs.length; i += 1) {
+        await sleep(retryAfterMs(r.headers) ?? pollDelaysMs[i]!);
+        r = await icaRequest(f, url, { headers });
+      }
       if (r.status === 202) throw new IcaUnavailable('not-ready');
       return parseIca(HandlaSearchSchema, r.json).productGroups.flatMap((g) => g.decoratedProducts);
     },

@@ -241,6 +241,8 @@ For zip 11122 (central Stockholm): `forHomeDelivery` had 63 stores, `forPickupDe
 ```
 `taxCodesDisplayNames` matched the redaction regex (`code`) and came back `<redacted>` in the saved fixture — harmless, just means that field's real value isn't captured in `spike/out`.
 
+Handla product search may answer 202 while preparing; the client polls up to ~7 s.
+
 **Store home page** — `GET https://handlaprivatkund.ica.se/stores/<accountId>/` → **HTTP 200**. The anonymous page **does** already embed a CSRF token (`"csrf":{"token":"..."}` present in the HTML — `csrf token present (anonymous): true`), and the page also matched the WAF/challenge heuristic (`waf challenge: true`) — the regex `/awswaf|challenge/i` matched somewhere in the HTML (likely boilerplate WAF/bot-protection script tags rather than an active interactive challenge, since the request still returned a normal 200 page body with product data reachable). Worth re-checking with the real network trace in Task 0.9 to see whether this is just static WAF JS or an actual blocking challenge under different conditions (e.g. higher request rate).
 
 No CSRF token was required to be sent by us to get 200s on GET requests in this run; whether it's required for mutating (cart) requests is out of scope for Task 0.8 (anonymous, read-only calls only).

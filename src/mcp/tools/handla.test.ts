@@ -40,12 +40,31 @@ describe('Handla tools', () => {
     expect((await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
   });
 
-  it('Handla still preparing after the retry: says so and to try again, never an HTTP status', async () => {
-    s.fake.opts.handlaPending = 2;
+  it('Handla still preparing after every poll: says so and to try again, never an HTTP status', async () => {
+    s.fake.opts.handlaPending = 99; // far more pending answers than the poll budget (1 initial + 5 polls) allows
     try {
       const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
       expect(r).toMatchObject({ isError: true, text: 'Handla is still preparing results; try again in a moment.' });
     } finally { s.fake.opts.handlaPending = 0; }
+  });
+
+  it('Handla still preparing for a few polls then answers: no error', async () => {
+    s.fake.opts.handlaPending = 3;
+    try {
+      const r = await s.alice.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      expect(r.isError).toBeFalsy();
+    } finally { s.fake.opts.handlaPending = 0; }
+  });
+
+  it('several Handla polls behind one 202 still spend only one of the caller\'s ICA budget tokens', async () => {
+    const tight = await startToolTest({ icaRateLimit: { capacity: 1, refillPerSecond: 0.001 } });
+    try {
+      tight.fake.opts.handlaPending = 3;
+      expect((await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' })).isError).toBe(false);
+      const r = await tight.carol.client.call('handla_search_products', { store: 'HS-1001', query: 'mjölk' });
+      expect(r.isError).toBe(true);
+      expect(r.text).toMatch(/Try again in \d+ s/);
+    } finally { await tight.close(); }
   });
 });
 

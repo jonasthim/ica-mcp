@@ -54,6 +54,8 @@ export type AppDeps = {
    * then loaded on the first /mcp request.
    */
   mcpKeys?: McpKeySet;
+  /** Handla's 202-poll waits, when createApp creates the keeper (default real timers); tests inject an instant one. */
+  handlaSleep?: (ms: number) => Promise<void>;
 };
 
 function allowedHost(config: Config) {
@@ -119,7 +121,7 @@ export function createApp(deps: AppDeps): Express {
   const version = deps.version ?? '0.0.0';
   const metrics = createMetrics(version);
   registerSessionMetrics(metrics.registry, deps.db, { appUpkeep: deps.config.appUpkeep });
-  const keeper = deps.keeper ?? createSessionKeeper({ db: deps.db, cipher: deps.cipher, endpoints: deps.icaEndpoints ?? DEFAULT_ICA_ENDPOINTS, log, limiter: createTokenBucket(deps.icaRateLimit) });
+  const keeper = deps.keeper ?? createSessionKeeper({ db: deps.db, cipher: deps.cipher, endpoints: deps.icaEndpoints ?? DEFAULT_ICA_ENDPOINTS, log, limiter: createTokenBucket(deps.icaRateLimit), handlaSleep: deps.handlaSleep });
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy);
