@@ -2,6 +2,15 @@
 
 All notable changes to ica-mcp (the `ica-hub` package) are listed here. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.2.1 — 2026-10-01
+
+### Fixed
+- Handla product search: when Handla answers 202 ("still preparing"), the hub now polls for up to about 7 s
+  (honouring `Retry-After`, capped at 3 s per wait) instead of giving up after one 0.5 s retry. Price comparisons
+  across several stores failed on the second store.
+- Logs: failed tool calls now carry the failure `reason` (e.g. `not-ready`, `rate-limited`, `server-error`) and the
+  HTTP status in the `tool call` line, so an ICA or Handla refusal can be told apart afterwards. No ICA content is logged.
+
 ## 0.2.0
 
 The first release. Published as a multi-arch Docker image (`ghcr.io/jonasthim/ica-mcp`, linux/amd64 and
